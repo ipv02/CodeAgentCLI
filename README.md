@@ -126,6 +126,8 @@ export CODE_AGENT_MAX_FILE_BYTES="122880"
 /status
 ```
 
+`/status` также показывает токены текущей сессии: total, prompt, answer.
+
 ## Разработка
 
 ```bash

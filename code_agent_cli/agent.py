@@ -32,6 +32,18 @@ class APIRequestError(CodeAgentError):
         super().__init__(message)
 
 
+@dataclass
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def add(self, usage: dict[str, Any]) -> None:
+        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+        self.completion_tokens += int(usage.get("completion_tokens") or 0)
+        self.total_tokens += int(usage.get("total_tokens") or 0)
+
+
 def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if not value:
@@ -70,6 +82,7 @@ class CodeAgent:
     temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
 
     def __post_init__(self) -> None:
+        self.token_usage = TokenUsage()
         self.reset_history()
 
     def send_message(self, text: str, history_text: str | None = None) -> str:
@@ -84,11 +97,12 @@ class CodeAgent:
 
         try:
             request_messages = self._request_messages(user_message, text)
-            answer = self._perform_request(request_messages)
+            answer, usage = self._perform_request(request_messages)
         except Exception:
             self.messages = [message for message in self.messages if message != user_message]
             raise
 
+        self.token_usage.add(usage)
         self.messages.append(self._message("assistant", answer))
         self._trim_history_if_needed()
         return answer
@@ -101,6 +115,9 @@ class CodeAgent:
             "temperature": self.temperature,
             "history_messages": max(len(self.messages) - 1, 0),
             "max_history_messages": self.max_history_messages,
+            "session_total_tokens": self.token_usage.total_tokens,
+            "session_prompt_tokens": self.token_usage.prompt_tokens,
+            "session_completion_tokens": self.token_usage.completion_tokens,
         }
 
     def reset_history(self) -> None:
@@ -108,7 +125,7 @@ class CodeAgent:
             self._message("system", SYSTEM_PROMPT)
         ]
 
-    def _perform_request(self, messages: list[dict[str, str]]) -> str:
+    def _perform_request(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
         payload = {
             "model": self.model,
             "messages": messages,
@@ -133,12 +150,13 @@ class CodeAgent:
 
         response_payload: dict[str, Any] = json.loads(response_text)
         choices = response_payload.get("choices") or []
+        usage = response_payload.get("usage") or {}
         if not choices:
-            return response_text or "Нет ответа"
+            return response_text or "Нет ответа", usage
 
         message = choices[0].get("message") or {}
         content = message.get("content")
-        return content or response_text or "Нет ответа"
+        return content or response_text or "Нет ответа", usage
 
     def _trim_history_if_needed(self) -> None:
         if len(self.messages) <= self.max_history_messages + 1:

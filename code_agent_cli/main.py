@@ -5,6 +5,7 @@ import itertools
 import os
 import re
 import sys
+import textwrap
 import threading
 import time
 from contextlib import contextmanager
@@ -30,6 +31,7 @@ MAGENTA = "\033[35m"
 BRIGHT_CYAN = "\033[96m"
 BRIGHT_GREEN = "\033[92m"
 DEFAULT_MAX_FILE_BYTES = 120 * 1024
+DEFAULT_WRAP_WIDTH = 88
 
 CODE_KEYWORDS = {
     "and",
@@ -294,15 +296,28 @@ def print_status(agent: CodeAgent) -> None:
     api_key_status = "задан" if status["api_key_configured"] else "не задан"
     history = f"{status['history_messages']} / {status['max_history_messages']}"
 
-    print_agent_answer(
-        f"""
-Модель: {status["model"]}
-Temperature: {status["temperature"]}
-История: {history} сообщений
-API URL: {status["api_url"]}
-DEEPSEEK_API_KEY: {api_key_status}
-""".strip()
-    )
+    for line in (
+        status_line("Модель", str(status["model"])),
+        status_line("Temperature", str(status["temperature"])),
+        status_line("История", f"{history} сообщений"),
+        status_line("API URL", str(status["api_url"])),
+        status_line(
+            "DEEPSEEK_API_KEY",
+            api_key_status,
+            GREEN if status["api_key_configured"] else YELLOW,
+        ),
+        "",
+        status_line("Токены сессии", str(status["session_total_tokens"]), BRIGHT_GREEN),
+        status_line("Prompt", str(status["session_prompt_tokens"])),
+        status_line("Answer", str(status["session_completion_tokens"])),
+    ):
+        print(line)
+
+
+def status_line(label: str, value: str, value_color: str = BLUE) -> str:
+    if not use_color():
+        return f"{label}: {value}"
+    return f"{DIM}{label}:{RESET} {value_color}{value}{RESET}"
 
 
 def session_summary(agent: CodeAgent) -> str:
@@ -405,13 +420,11 @@ def print_agent_answer(answer: str) -> None:
 
 
 def render_answer(answer: str) -> list[str]:
-    if not use_color():
-        return answer.splitlines()
-
     rendered: list[str] = []
     code_lines: list[str] = []
     code_language = ""
     in_code = False
+    previous_blank = False
 
     for line in answer.splitlines():
         if line.startswith("```"):
@@ -427,8 +440,13 @@ def render_answer(answer: str) -> list[str]:
 
         if in_code:
             code_lines.append(line)
+        elif not line.strip():
+            if not previous_blank:
+                rendered.append("")
+            previous_blank = True
         else:
-            rendered.append(colorize(line, BLUE) if line else "")
+            rendered.extend(render_text_line(line))
+            previous_blank = False
 
     if in_code:
         rendered.extend(render_code_block(code_lines, code_language))
@@ -436,7 +454,53 @@ def render_answer(answer: str) -> list[str]:
     return rendered
 
 
+def render_text_line(line: str) -> list[str]:
+    width = terminal_text_width()
+    stripped = line.strip()
+    indent = text_indent(line)
+    bullet_prefix = list_prefix(stripped)
+
+    if bullet_prefix:
+        body = stripped[len(bullet_prefix) :].strip()
+        wrapped = textwrap.wrap(
+            body,
+            width=max(width - len(indent) - len(bullet_prefix), 20),
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+        lines = [indent + bullet_prefix + wrapped[0]]
+        continuation_indent = indent + " " * len(bullet_prefix)
+        lines.extend(continuation_indent + part for part in wrapped[1:])
+    else:
+        wrapped = textwrap.wrap(
+            stripped,
+            width=max(width - len(indent), 20),
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+        lines = [indent + part for part in wrapped]
+
+    return [colorize(line, BLUE) for line in lines]
+
+
+def terminal_text_width() -> int:
+    terminal_width = os.get_terminal_size().columns if sys.stdout.isatty() else DEFAULT_WRAP_WIDTH
+    return max(min(terminal_width, DEFAULT_WRAP_WIDTH), 50)
+
+
+def text_indent(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
+
+
+def list_prefix(line: str) -> str:
+    match = re.match(r"^([-*+]|\d+[.)])\s+", line)
+    return match.group(0) if match else ""
+
+
 def render_code_block(lines: list[str], language: str) -> list[str]:
+    if not use_color():
+        return lines
+
     width = max([len(strip_ansi(line)) for line in lines] + [len(language), 8])
     width = min(width, 100)
     title = f" {language} " if language else " code "
