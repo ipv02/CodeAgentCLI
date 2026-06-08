@@ -83,6 +83,12 @@ class FileRange:
     end: int
 
 
+@dataclass(frozen=True)
+class PromptPayload:
+    request_text: str
+    history_text: str | None = None
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -181,11 +187,11 @@ def run_interactive_session(agent: CodeAgent) -> None:
         send(agent, text)
 
 
-def build_prompt(args: argparse.Namespace) -> str:
+def build_prompt(args: argparse.Namespace) -> PromptPayload:
     user_prompt = " ".join(args.prompt).strip()
 
     if args.file is None:
-        return user_prompt
+        return PromptPayload(request_text=user_prompt)
 
     file_content = read_attached_file(
         args.file,
@@ -195,18 +201,25 @@ def build_prompt(args: argparse.Namespace) -> str:
     )
     range_note = f", строки {args.line_range}" if args.line_range else ""
 
-    return f"""{user_prompt}
+    request_text = f"""{user_prompt}
 
 Код из файла {args.file}{range_note}:
 ```text
 {file_content}
 ```"""
+    history_text = f"{user_prompt}\n\n[Файл {args.file}{range_note} был приложен к запросу.]"
+    return PromptPayload(request_text=request_text, history_text=history_text)
 
 
-def send(agent: CodeAgent, prompt: str) -> bool:
+def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
+    payload = normalize_prompt(prompt)
+
     try:
         with loader("Думаю"):
-            answer = agent.send_message(prompt)
+            answer = agent.send_message(
+                payload.request_text,
+                history_text=payload.history_text,
+            )
     except MissingAPIKeyError as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         return False
@@ -221,6 +234,12 @@ def send(agent: CodeAgent, prompt: str) -> bool:
     print_agent_answer(answer)
     print()
     return True
+
+
+def normalize_prompt(prompt: str | PromptPayload) -> PromptPayload:
+    if isinstance(prompt, PromptPayload):
+        return prompt
+    return PromptPayload(request_text=prompt)
 
 
 @contextmanager
@@ -273,7 +292,6 @@ def print_help() -> None:
 def print_status(agent: CodeAgent) -> None:
     status = agent.status()
     api_key_status = "задан" if status["api_key_configured"] else "не задан"
-    color_status = "включены" if use_color() else "выключены"
     history = f"{status['history_messages']} / {status['max_history_messages']}"
 
     print_agent_answer(
@@ -283,7 +301,6 @@ Temperature: {status["temperature"]}
 История: {history} сообщений
 API URL: {status["api_url"]}
 DEEPSEEK_API_KEY: {api_key_status}
-Цвета: {color_status}
 """.strip()
     )
 

@@ -1,10 +1,6 @@
 # CodeAgentCLI
 
-Лёгкий Python CLI-ассистент для кодинга в терминале.
-
-Умеет работать в интерактивном чате, отвечать на одноразовые запросы, читать
-файлы с кодом, показывать лоадер `Думаю...`, подсвечивать ответы и оформлять
-блоки кода.
+Python CLI-ассистент для работы с кодом в терминале.
 
 ## Требования
 
@@ -25,7 +21,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install .
 ```
 
-Если SSH для GitHub не настроен:
+HTTPS-вариант:
 
 ```bash
 git clone https://github.com/ipv02/CodeAgentCLI.git
@@ -33,81 +29,37 @@ git clone https://github.com/ipv02/CodeAgentCLI.git
 
 ## API-ключ
 
-Временный вариант для текущего терминала:
+На текущую сессию терминала:
 
 ```bash
-export DEEPSEEK_API_KEY="ваш_реальный_deepseek_ключ"
+export DEEPSEEK_API_KEY="ваш_ключ"
 ```
 
-Постоянный вариант для `zsh`:
+Постоянно для `zsh`:
 
 ```bash
-echo 'export DEEPSEEK_API_KEY="ваш_реальный_deepseek_ключ"' >> ~/.zshrc
+echo 'export DEEPSEEK_API_KEY="ваш_ключ"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Для `bash` используйте `~/.bashrc` или `~/.bash_profile`.
-
-Не добавляйте реальный ключ в файлы проекта и не коммитьте его в Git.
+Не храните реальный ключ в файлах проекта.
 
 ## Запуск
 
-Интерактивный режим:
-
 ```bash
 source .venv/bin/activate
 code-agent
 ```
 
-На старте CLI показывает модель и размер истории:
+Команды внутри чата:
 
 ```text
-Code Agent CLI
-Команды: /help, /status, /reset, /exit
-Модель: deepseek-v4-flash · История: 0/20
->
+/help
+/status
+/reset
+/exit
+/quit
 ```
-
-В новом терминале достаточно снова активировать `.venv`:
-
-```bash
-cd CodeAgentCLI
-source .venv/bin/activate
-code-agent
-```
-
-Создавать `.venv` и выполнять `pip install .` каждый раз не нужно.
-
-## Shortcut
-
-Чтобы запускать `code-agent` из любой папки без ручной активации `.venv`,
-добавьте в `~/.zshrc`:
-
-```bash
-code-agent() {
-  /path/to/CodeAgentCLI/.venv/bin/code-agent "$@"
-}
-```
-
-Замените `/path/to/CodeAgentCLI` на путь к папке проекта, затем выполните:
-
-```bash
-source ~/.zshrc
-```
-
-## Команды чата
-
-```text
-/help   помощь
-/status текущие настройки
-/reset  очистить историю сессии
-/exit   выйти
-/quit   выйти
-```
-
-История хранится только в памяти текущего запуска CLI.
-
-## Примеры
 
 Одноразовый запрос:
 
@@ -115,56 +67,51 @@ source ~/.zshrc
 code-agent "объясни, чем struct отличается от class в Swift"
 ```
 
-Запрос с файлом:
+## Работа с файлами
+
+Весь файл:
 
 ```bash
 code-agent --file Sources/App.swift "найди ошибки"
 ```
 
-Только часть файла:
+Диапазон строк:
 
 ```bash
-code-agent --file Sources/App.swift --range 40:120 "проверь этот участок"
+code-agent --file Sources/App.swift --range 40:120 "проверь участок"
 ```
 
-Большие файлы требуют подтверждения. Отправить без подтверждения:
+Большой файл без подтверждения:
 
 ```bash
 code-agent --file big_file.py --force-file "проверь файл"
 ```
 
-Изменить лимит большого файла:
+Другой лимит размера файла:
 
 ```bash
 code-agent --file big_file.py --max-file-bytes 200000 "проверь файл"
 ```
 
-## Вывод в терминале
+Содержимое приложенного файла не сохраняется целиком в историю диалога.
 
-- ввод пользователя зелёный;
-- ответы агента голубые;
-- код выводится в отдельной рамке с номерами строк;
-- пока идёт запрос к API, показывается `Думаю...`.
+## Shortcut
 
-Отключить цвета:
+Чтобы запускать `code-agent` без ручной активации `.venv`, добавьте в `~/.zshrc`:
 
 ```bash
-NO_COLOR=1 code-agent
+code-agent() {
+  /path/to/CodeAgentCLI/.venv/bin/code-agent "$@"
+}
+```
+
+Затем:
+
+```bash
+source ~/.zshrc
 ```
 
 ## Настройки
-
-По умолчанию:
-
-```text
-API URL:       https://api.deepseek.com/chat/completions
-Модель:        deepseek-v4-flash
-Temperature:   0.2
-История:       20 сообщений
-Лимит файла:   120 KB
-```
-
-Можно изменить через переменные окружения:
 
 ```bash
 export CODE_AGENT_MODEL="deepseek-v4-flash"
@@ -173,39 +120,10 @@ export CODE_AGENT_MAX_HISTORY="20"
 export CODE_AGENT_MAX_FILE_BYTES="122880"
 ```
 
-Проверить текущие настройки внутри чата:
+Текущие настройки:
 
 ```text
 /status
-```
-
-## Частые проблемы
-
-`code-agent: command not found`
-
-```bash
-source .venv/bin/activate
-which code-agent
-```
-
-`Не задан DEEPSEEK_API_KEY`
-
-```bash
-export DEEPSEEK_API_KEY="ваш_реальный_deepseek_ключ"
-```
-
-Ошибка установки:
-
-```bash
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install .
-```
-
-Файл слишком большой:
-
-```bash
-code-agent --file path/to/file.py --range 1:120 "проверь участок"
-code-agent --file path/to/file.py --force-file "проверь весь файл"
 ```
 
 ## Разработка
@@ -214,4 +132,3 @@ code-agent --file path/to/file.py --force-file "проверь весь файл
 python -m pip install -e .
 python -m compileall code_agent_cli
 ```
-

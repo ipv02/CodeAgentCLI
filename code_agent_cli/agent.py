@@ -72,18 +72,19 @@ class CodeAgent:
     def __post_init__(self) -> None:
         self.reset_history()
 
-    def send_message(self, text: str) -> str:
+    def send_message(self, text: str, history_text: str | None = None) -> str:
         if not self.api_key:
             raise MissingAPIKeyError(
                 'Не задан DEEPSEEK_API_KEY. Выполните: export DEEPSEEK_API_KEY="ваш_ключ"'
             )
 
-        user_message = self._message("user", text)
+        user_message = self._message("user", history_text or text)
         self.messages.append(user_message)
         self._trim_history_if_needed()
 
         try:
-            answer = self._perform_request(self.messages)
+            request_messages = self._request_messages(user_message, text)
+            answer = self._perform_request(request_messages)
         except Exception:
             self.messages = [message for message in self.messages if message != user_message]
             raise
@@ -146,6 +147,18 @@ class CodeAgent:
         system_message = self.messages[0]
         recent_messages = self.messages[-self.max_history_messages:]
         self.messages = [system_message, *recent_messages]
+
+    def _request_messages(
+        self,
+        history_user_message: dict[str, str],
+        request_text: str,
+    ) -> list[dict[str, str]]:
+        if history_user_message["content"] == request_text:
+            return self.messages
+
+        request_messages = list(self.messages)
+        request_messages[-1] = self._message("user", request_text)
+        return request_messages
 
     @staticmethod
     def _message(role: str, content: str) -> dict[str, str]:
