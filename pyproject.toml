@@ -1,0 +1,15 @@
+[project]
+name = "code-agent-cli"
+version = "0.1.0"
+description = "Standalone terminal coding assistant based on the LLMRequest agent prompt."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+]
+
+[project.scripts]
+code-agent = "code_agent_cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
