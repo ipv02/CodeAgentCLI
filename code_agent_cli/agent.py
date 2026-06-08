@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError
@@ -24,13 +24,50 @@ class MissingAPIKeyError(CodeAgentError):
     """Raised when DEEPSEEK_API_KEY is not configured."""
 
 
+class APIRequestError(CodeAgentError):
+    """Raised when the API returns an error response."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if not value:
+        return default
+
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 @dataclass
 class CodeAgent:
     api_key: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""))
-    api_url: str = "https://api.deepseek.com/chat/completions"
-    model: str = "deepseek-v4-flash"
-    max_history_messages: int = 20
-    temperature: float = 0.2
+    api_url: str = field(
+        default_factory=lambda: os.getenv(
+            "CODE_AGENT_API_URL",
+            "https://api.deepseek.com/chat/completions",
+        )
+    )
+    model: str = field(default_factory=lambda: os.getenv("CODE_AGENT_MODEL", "deepseek-v4-flash"))
+    max_history_messages: int = field(
+        default_factory=lambda: env_int("CODE_AGENT_MAX_HISTORY", 20)
+    )
+    temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
 
     def __post_init__(self) -> None:
         self.reset_history()
@@ -54,6 +91,16 @@ class CodeAgent:
         self.messages.append(self._message("assistant", answer))
         self._trim_history_if_needed()
         return answer
+
+    def status(self) -> dict[str, str | int | float | bool]:
+        return {
+            "api_key_configured": bool(self.api_key),
+            "api_url": self.api_url,
+            "model": self.model,
+            "temperature": self.temperature,
+            "history_messages": max(len(self.messages) - 1, 0),
+            "max_history_messages": self.max_history_messages,
+        }
 
     def reset_history(self) -> None:
         self.messages: list[dict[str, str]] = [
@@ -81,7 +128,7 @@ class CodeAgent:
                 response_text = response.read().decode("utf-8")
         except HTTPError as error:
             response_text = error.read().decode("utf-8")
-            return response_text or "Ошибка API"
+            raise APIRequestError(error.code, format_api_error(error.code, response_text)) from error
 
         response_payload: dict[str, Any] = json.loads(response_text)
         choices = response_payload.get("choices") or []
@@ -106,3 +153,32 @@ class CodeAgent:
             "role": role,
             "content": content,
         }
+
+
+def format_api_error(status_code: int, response_text: str) -> str:
+    detail = extract_api_error_message(response_text)
+
+    if status_code == 401:
+        return f"Ошибка API 401: проверьте DEEPSEEK_API_KEY. {detail}".strip()
+    if status_code == 429:
+        return f"Ошибка API 429: лимит запросов или квоты. Попробуйте позже. {detail}".strip()
+    if status_code >= 500:
+        return f"Ошибка API {status_code}: сервис временно недоступен. {detail}".strip()
+    return f"Ошибка API {status_code}: {detail or response_text or 'нет деталей'}"
+
+
+def extract_api_error_message(response_text: str) -> str:
+    if not response_text:
+        return ""
+
+    try:
+        payload = json.loads(response_text)
+    except json.JSONDecodeError:
+        return response_text
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        return str(message) if message else ""
+
+    return response_text
