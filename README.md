@@ -1,6 +1,6 @@
 # CodeAgentCLI
 
-Standalone Python CLI-ассистент для кодинга. Агентская логика и system prompt скопированы из `LLMRequest/Service/MyAgentService.swift`, но проект не зависит от `LLMRequest`.
+Standalone Python CLI-ассистент для кодинга.
 
 ## Установка для разработки
 
