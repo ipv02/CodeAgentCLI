@@ -271,35 +271,71 @@ def loader(label: str) -> Iterator[None]:
 
 
 def print_help() -> None:
-    print_agent_answer(
-        """
-Использование:
-  code-agent
-  code-agent "объясни, чем struct отличается от class в Swift"
-  code-agent --file Sources/App.swift "найди ошибки"
-  code-agent --file Sources/App.swift --range 40:120 "проверь этот участок"
-
-Переменная окружения:
-  export DEEPSEEK_API_KEY="ваш_ключ"
-
-Интерактивные команды:
-  /help   показать помощь
-  /status показать настройки текущей сессии
-  /reset  очистить историю текущей сессии
-  /exit   выйти
-""".strip()
+    print_section(
+        "Использование",
+        (
+            "code-agent",
+            'code-agent "объясни, чем struct отличается от class в Swift"',
+            'code-agent --file Sources/App.swift "найди ошибки"',
+            'code-agent --file Sources/App.swift --range 40:120 "проверь этот участок"',
+        ),
     )
+    print()
+    print_section(
+        "Переменная окружения",
+        ('export DEEPSEEK_API_KEY="ваш_ключ"',),
+    )
+    print()
+    print_command_help(
+        (
+            ("/help", "показать помощь"),
+            ("/status", "показать настройки текущей сессии"),
+            ("/reset", "очистить сохраненную историю"),
+            ("/exit", "выйти"),
+        )
+    )
+
+
+def print_section(title: str, lines: tuple[str, ...]) -> None:
+    print(header_line(title))
+    for line in lines:
+        print(command_line(line))
+
+
+def print_command_help(commands: tuple[tuple[str, str], ...]) -> None:
+    print(header_line("Интерактивные команды"))
+    width = max(len(command) for command, _ in commands)
+    for command, description in commands:
+        if not use_color():
+            print(f"  {command:<{width}}  {description}")
+            continue
+        print(f"  {GREEN}{command:<{width}}{RESET}  {BLUE}{description}{RESET}")
+
+
+def header_line(text: str) -> str:
+    if not use_color():
+        return f"{text}:"
+    return f"{DIM}{text}:{RESET}"
+
+
+def command_line(text: str) -> str:
+    if not use_color():
+        return f"  {text}"
+    return f"  {BRIGHT_CYAN}{text}{RESET}"
 
 
 def print_status(agent: CodeAgent) -> None:
     status = agent.status()
     api_key_status = "задан" if status["api_key_configured"] else "не задан"
     history = f"{status['history_messages']} / {status['max_history_messages']}"
+    history_loaded = "загружена" if status["history_loaded"] else "новая"
 
     for line in (
         status_line("Модель", str(status["model"])),
         status_line("Temperature", str(status["temperature"])),
         status_line("История", f"{history} сообщений"),
+        status_line("Файл истории", str(status["history_file"])),
+        status_line("Состояние истории", history_loaded),
         status_line("API URL", str(status["api_url"])),
         status_line(
             "DEEPSEEK_API_KEY",
@@ -324,7 +360,8 @@ def session_summary(agent: CodeAgent) -> str:
     status = agent.status()
     return (
         f"Модель: {status['model']} · "
-        f"История: {status['history_messages']}/{status['max_history_messages']}"
+        f"История: {status['history_messages']}/{status['max_history_messages']} · "
+        f"{'загружена' if status['history_loaded'] else 'новая'}"
     )
 
 

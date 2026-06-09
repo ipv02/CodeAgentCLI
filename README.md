@@ -61,6 +61,14 @@ code-agent
 /quit
 ```
 
+История диалога сохраняется между запусками в:
+
+```text
+~/.code-agent-cli/history.json
+```
+
+При следующем запуске `code-agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` очищает и текущую, и сохраненную историю.
+
 Одноразовый запрос:
 
 ```bash
@@ -118,6 +126,7 @@ export CODE_AGENT_MODEL="deepseek-v4-flash"
 export CODE_AGENT_TEMPERATURE="0.2"
 export CODE_AGENT_MAX_HISTORY="20"
 export CODE_AGENT_MAX_FILE_BYTES="122880"
+export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 ```
 
 Текущие настройки:
@@ -127,6 +136,7 @@ export CODE_AGENT_MAX_FILE_BYTES="122880"
 ```
 
 `/status` также показывает токены текущей сессии: total, prompt, answer.
+Там же отображается путь к файлу истории и была ли история загружена при старте.
 
 ## Разработка
 

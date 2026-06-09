@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+from code_agent_cli.storage import HistoryStorage, default_history_file
 
 
 SYSTEM_PROMPT = """
@@ -90,10 +93,14 @@ class CodeAgent:
         default_factory=lambda: env_int("CODE_AGENT_MAX_HISTORY", 20)
     )
     temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
+    history_file: Path = field(default_factory=default_history_file)
 
     def __post_init__(self) -> None:
         self.token_usage = TokenUsage()
-        self.reset_history()
+        self.history_storage = HistoryStorage(self.history_file)
+        self.history_loaded = False
+        self.messages = self._load_history()
+        self._trim_history_if_needed()
 
     def send_message(self, text: str, history_text: str | None = None) -> str:
         if not self.api_key:
@@ -115,6 +122,7 @@ class CodeAgent:
         self.token_usage.add(usage)
         self.messages.append(self._message("assistant", answer))
         self._trim_history_if_needed()
+        self._save_history()
         return answer
 
     def status(self) -> dict[str, str | int | float | bool]:
@@ -128,12 +136,14 @@ class CodeAgent:
             "session_total_tokens": self.token_usage.total_tokens,
             "session_prompt_tokens": self.token_usage.prompt_tokens,
             "session_completion_tokens": self.token_usage.completion_tokens,
+            "history_file": str(self.history_storage.path),
+            "history_loaded": self.history_loaded,
         }
 
     def reset_history(self) -> None:
-        self.messages: list[dict[str, str]] = [
-            self._message("system", SYSTEM_PROMPT)
-        ]
+        self.messages = self._initial_messages()
+        self.history_loaded = False
+        self._save_history()
 
     def _perform_request(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
         payload = {
@@ -175,6 +185,28 @@ class CodeAgent:
         system_message = self.messages[0]
         recent_messages = self.messages[-self.max_history_messages:]
         self.messages = [system_message, *recent_messages]
+
+    def _load_history(self) -> list[dict[str, str]]:
+        messages = self.history_storage.load()
+        if messages is None:
+            return self._initial_messages()
+
+        self.history_loaded = True
+        return self._normalize_history(messages)
+
+    def _normalize_history(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        user_visible_messages = [
+            message
+            for message in messages
+            if message["role"] in {"user", "assistant"}
+        ]
+        return [self._message("system", SYSTEM_PROMPT), *user_visible_messages]
+
+    def _save_history(self) -> None:
+        self.history_storage.save(self.messages)
+
+    def _initial_messages(self) -> list[dict[str, str]]:
+        return [self._message("system", SYSTEM_PROMPT)]
 
     def _request_messages(
         self,
