@@ -24,14 +24,23 @@ from code_agent_cli.agent import APIRequestError, CodeAgent, MissingAPIKeyError
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
-BLUE = "\033[36m"
+BLUE = "\033[38;5;110m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
 MAGENTA = "\033[35m"
 BRIGHT_CYAN = "\033[96m"
 BRIGHT_GREEN = "\033[92m"
+ANSWER_TEXT = "\033[38;5;153m"
+ANSWER_MUTED = "\033[38;5;244m"
+ANSWER_ACCENT = "\033[38;5;110m"
+CODE_BORDER = "\033[38;5;67m"
+CODE_TEXT = "\033[38;5;253m"
+CODE_STRING = "\033[38;5;180m"
+CODE_NUMBER = "\033[38;5;149m"
+CODE_KEYWORD = "\033[38;5;141m"
 DEFAULT_MAX_FILE_BYTES = 120 * 1024
-DEFAULT_WRAP_WIDTH = 88
+DEFAULT_WRAP_WIDTH = 96
+MIN_WRAP_WIDTH = 56
 
 CODE_KEYWORDS = {
     "and",
@@ -458,37 +467,135 @@ def print_agent_answer(answer: str) -> None:
 
 def render_answer(answer: str) -> list[str]:
     rendered: list[str] = []
+    text_lines: list[str] = []
     code_lines: list[str] = []
     code_language = ""
     in_code = False
-    previous_blank = False
+
+    def flush_text() -> None:
+        if not text_lines:
+            return
+        rendered.extend(render_text_block(text_lines))
+        text_lines.clear()
 
     for line in answer.splitlines():
         if line.startswith("```"):
             if in_code:
+                flush_text()
                 rendered.extend(render_code_block(code_lines, code_language))
                 code_lines = []
                 code_language = ""
                 in_code = False
             else:
+                flush_text()
                 in_code = True
                 code_language = line.removeprefix("```").strip()
             continue
 
         if in_code:
             code_lines.append(line)
-        elif not line.strip():
-            if not previous_blank:
-                rendered.append("")
-            previous_blank = True
         else:
-            rendered.extend(render_text_line(line))
-            previous_blank = False
+            text_lines.append(line)
 
     if in_code:
         rendered.extend(render_code_block(code_lines, code_language))
+    else:
+        flush_text()
 
+    return trim_blank_edges(rendered)
+
+
+def render_text_block(lines: list[str]) -> list[str]:
+    rendered: list[str] = []
+    paragraph: list[str] = []
+    previous_blank = False
+
+    def flush_paragraph() -> None:
+        if not paragraph:
+            return
+        rendered.extend(render_paragraph(" ".join(part.strip() for part in paragraph)))
+        paragraph.clear()
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not stripped:
+            flush_paragraph()
+            if rendered and not previous_blank:
+                rendered.append("")
+            previous_blank = True
+            continue
+
+        if heading_level(stripped):
+            flush_paragraph()
+            if rendered and not previous_blank:
+                rendered.append("")
+            rendered.extend(render_heading(stripped))
+            previous_blank = False
+            continue
+
+        if list_prefix(stripped):
+            flush_paragraph()
+            rendered.extend(render_list_item(stripped))
+            previous_blank = False
+            continue
+
+        paragraph.append(stripped)
+        previous_blank = False
+
+    flush_paragraph()
     return rendered
+
+
+def render_paragraph(text: str) -> list[str]:
+    width = content_width()
+    lines = textwrap.wrap(
+        text,
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [""]
+    return [colorize(line, ANSWER_TEXT) for line in lines]
+
+
+def render_heading(line: str) -> list[str]:
+    level = heading_level(line)
+    title = line[level:].strip()
+    if not title:
+        return []
+
+    color = ANSWER_ACCENT + (BOLD if level <= 2 else "")
+    return [colorize(title, color)]
+
+
+def heading_level(line: str) -> int:
+    match = re.match(r"^(#{1,6})\s+", line)
+    return len(match.group(1)) if match else 0
+
+
+def render_list_item(line: str) -> list[str]:
+    width = content_width()
+    prefix = list_prefix(line)
+    body = line[len(prefix) :].strip()
+    continuation_indent = " " * len(prefix)
+    wrapped = textwrap.wrap(
+        body,
+        width=max(width - len(prefix), 24),
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [""]
+
+    lines = [prefix + wrapped[0]]
+    lines.extend(continuation_indent + part for part in wrapped[1:])
+    return [colorize(line, ANSWER_TEXT) for line in lines]
+
+
+def trim_blank_edges(lines: list[str]) -> list[str]:
+    while lines and not strip_ansi(lines[0]).strip():
+        lines.pop(0)
+    while lines and not strip_ansi(lines[-1]).strip():
+        lines.pop()
+    return lines
 
 
 def render_text_line(line: str) -> list[str]:
@@ -517,12 +624,16 @@ def render_text_line(line: str) -> list[str]:
         ) or [""]
         lines = [indent + part for part in wrapped]
 
-    return [colorize(line, BLUE) for line in lines]
+    return [colorize(line, ANSWER_TEXT) for line in lines]
 
 
 def terminal_text_width() -> int:
     terminal_width = os.get_terminal_size().columns if sys.stdout.isatty() else DEFAULT_WRAP_WIDTH
-    return max(min(terminal_width, DEFAULT_WRAP_WIDTH), 50)
+    return max(min(terminal_width, DEFAULT_WRAP_WIDTH), MIN_WRAP_WIDTH)
+
+
+def content_width() -> int:
+    return max(terminal_text_width() - 2, 40)
 
 
 def text_indent(line: str) -> str:
@@ -538,21 +649,34 @@ def render_code_block(lines: list[str], language: str) -> list[str]:
     if not use_color():
         return lines
 
-    width = max([len(strip_ansi(line)) for line in lines] + [len(language), 8])
-    width = min(width, 100)
-    title = f" {language} " if language else " code "
-    top = f"{BRIGHT_CYAN}┌{title}{'─' * max(width - len(title), 0)}┐{RESET}"
-    bottom = f"{BRIGHT_CYAN}└{'─' * width}┘{RESET}"
+    number_width = len(str(max(len(lines), 1)))
+    max_code_width = max([len(line) for line in lines] + [len(language), 8])
+    available_width = terminal_text_width()
+    code_width = max(
+        min(max_code_width, available_width - number_width - 7),
+        24,
+    )
+    inner_width = number_width + 3 + code_width
+    title = f" {language or 'code'} "
+    top = (
+        f"{CODE_BORDER}┌"
+        f"{colorize(title, ANSWER_MUTED)}"
+        f"{CODE_BORDER}"
+        f"{'─' * max(inner_width - len(title), 0)}"
+        f"┐{RESET}"
+    )
+    bottom = f"{CODE_BORDER}└{'─' * inner_width}┘{RESET}"
     number_width = len(str(max(len(lines), 1)))
 
     rendered = [top]
     for index, line in enumerate(lines, start=1):
         number = f"{index:>{number_width}}"
-        highlighted = highlight_code(line)
+        highlighted = pad_ansi(truncate_ansi(highlight_code(line), code_width), code_width)
         rendered.append(
-            f"{BRIGHT_CYAN}│{RESET} "
-            f"{DIM}{number}{RESET} "
+            f"{CODE_BORDER}│{RESET}"
+            f" {colorize(number, ANSWER_MUTED)} "
             f"{highlighted}"
+            f"{CODE_BORDER}│{RESET}"
         )
     rendered.append(bottom)
     return rendered
@@ -566,32 +690,46 @@ def highlight_code(line: str) -> str:
     parts = re.split(r"((?:'[^']*')|(?:\"[^\"]*\"))", code)
     highlighted_parts: list[str] = []
 
-    keyword_pattern = r"\b(" + "|".join(sorted(CODE_KEYWORDS)) + r")\b"
+    token_pattern = re.compile(
+        r"\b(" + "|".join(sorted(CODE_KEYWORDS)) + r")\b"
+        r"|\b\d+(\.\d+)?\b"
+    )
     for part in parts:
         if not part:
             continue
         if (part.startswith('"') and part.endswith('"')) or (
             part.startswith("'") and part.endswith("'")
         ):
-            highlighted_parts.append(colorize(part, YELLOW))
+            highlighted_parts.append(colorize(part, CODE_STRING))
             continue
 
-        part = re.sub(
-            r"\b\d+(\.\d+)?\b",
-            lambda match: colorize(match.group(0), BRIGHT_GREEN),
-            part,
-        )
-        part = re.sub(
-            keyword_pattern,
-            lambda match: colorize(match.group(0), MAGENTA + BOLD),
-            part,
-        )
-        highlighted_parts.append(part)
+        highlighted_parts.append(highlight_code_tokens(part, token_pattern))
 
     highlighted = "".join(highlighted_parts)
     if comment:
-        highlighted += colorize(comment, DIM)
+        highlighted += colorize(comment, ANSWER_MUTED)
     return highlighted
+
+
+def highlight_code_tokens(text: str, token_pattern: re.Pattern[str]) -> str:
+    highlighted: list[str] = []
+    cursor = 0
+
+    for match in token_pattern.finditer(text):
+        if match.start() > cursor:
+            highlighted.append(colorize(text[cursor : match.start()], CODE_TEXT))
+
+        token = match.group(0)
+        if token in CODE_KEYWORDS:
+            highlighted.append(colorize(token, CODE_KEYWORD + BOLD))
+        else:
+            highlighted.append(colorize(token, CODE_NUMBER))
+        cursor = match.end()
+
+    if cursor < len(text):
+        highlighted.append(colorize(text[cursor:], CODE_TEXT))
+
+    return "".join(highlighted)
 
 
 def split_comment(line: str) -> tuple[str, str]:
@@ -641,6 +779,38 @@ def use_color() -> bool:
 
 def strip_ansi(text: str) -> str:
     return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def truncate_ansi(text: str, max_width: int) -> str:
+    plain = strip_ansi(text)
+    if len(plain) <= max_width:
+        return text
+
+    target_width = max(max_width - 1, 0)
+    result: list[str] = []
+    visible_width = 0
+    index = 0
+
+    while index < len(text) and visible_width < target_width:
+        if text[index] == "\033":
+            match = re.match(r"\033\[[0-9;]*m", text[index:])
+            if match:
+                result.append(match.group(0))
+                index += len(match.group(0))
+                continue
+
+        result.append(text[index])
+        visible_width += 1
+        index += 1
+
+    result.append("…")
+    result.append(RESET)
+    return "".join(result)
+
+
+def pad_ansi(text: str, width: int) -> str:
+    padding = max(width - len(strip_ansi(text)), 0)
+    return text + (" " * padding)
 
 
 def env_int(name: str, default: int) -> int:
