@@ -46,6 +46,16 @@ class APIRequestError(CodeAgentError):
         super().__init__(message)
 
 
+class ContextLimitExceededError(CodeAgentError):
+    """Raised when a request would exceed the configured context limit."""
+
+    def __init__(self, breakdown: TokenBreakdown) -> None:
+        self.breakdown = breakdown
+        super().__init__(
+            "Запрос не отправлен: превышен лимит контекстного окна."
+        )
+
+
 @dataclass
 class TokenUsage:
     prompt_tokens: int = 0
@@ -123,30 +133,33 @@ class CodeAgent:
         self._trim_history_if_needed()
 
     def send_message(self, text: str, history_text: str | None = None) -> str:
+        user_message = self._message("user", history_text or text)
+        request_messages = self._request_messages_for_user_message(user_message, text)
+        self.last_token_breakdown = self.token_counter.build_breakdown(
+            request_messages,
+            text,
+        )
+        self.last_actual_usage = {}
+
+        if not self.last_token_breakdown.fits_context:
+            raise ContextLimitExceededError(self.last_token_breakdown)
+
         if not self.api_key:
             raise MissingAPIKeyError(
                 'Не задан DEEPSEEK_API_KEY. Выполните: export DEEPSEEK_API_KEY="ваш_ключ"'
             )
 
-        user_message = self._message("user", history_text or text)
-        self.messages.append(user_message)
-        self._trim_history_if_needed()
-
-        try:
-            request_messages = self._request_messages(user_message, text)
-            self.last_token_breakdown = self.token_counter.build_breakdown(
-                request_messages,
-                text,
-            )
-            answer, usage = self._perform_request(request_messages)
-        except Exception:
-            self.messages = [message for message in self.messages if message != user_message]
-            raise
+        answer, usage = self._perform_request(request_messages)
 
         self.last_actual_usage = usage
         self.token_usage.add(usage)
-        self.messages.append(self._message("assistant", answer))
-        self._trim_history_if_needed()
+        self.messages = self._trimmed_messages(
+            [
+                *self.messages,
+                user_message,
+                self._message("assistant", answer),
+            ]
+        )
         self._save_history()
         return answer
 
@@ -171,9 +184,7 @@ class CodeAgent:
 
     def estimate_tokens(self, text: str, history_text: str | None = None) -> TokenBreakdown:
         user_message = self._message("user", history_text or text)
-        request_messages = self._trimmed_messages([*self.messages, user_message])
-        if history_text and history_text != text:
-            request_messages[-1] = self._message("user", text)
+        request_messages = self._request_messages_for_user_message(user_message, text)
         return self.token_counter.build_breakdown(request_messages, text)
 
     def reset_history(self) -> None:
@@ -247,16 +258,14 @@ class CodeAgent:
     def _initial_messages(self) -> list[dict[str, str]]:
         return [self._message("system", SYSTEM_PROMPT)]
 
-    def _request_messages(
+    def _request_messages_for_user_message(
         self,
         history_user_message: dict[str, str],
         request_text: str,
     ) -> list[dict[str, str]]:
-        if history_user_message["content"] == request_text:
-            return self.messages
-
-        request_messages = list(self.messages)
-        request_messages[-1] = self._message("user", request_text)
+        request_messages = self._trimmed_messages([*self.messages, history_user_message])
+        if history_user_message["content"] != request_text:
+            request_messages[-1] = self._message("user", request_text)
         return request_messages
 
     @staticmethod

@@ -18,7 +18,12 @@ try:
 except ImportError:
     readline = None
 
-from code_agent_cli.agent import APIRequestError, CodeAgent, MissingAPIKeyError
+from code_agent_cli.agent import (
+    APIRequestError,
+    CodeAgent,
+    ContextLimitExceededError,
+    MissingAPIKeyError,
+)
 from code_agent_cli.tokens import TokenBreakdown
 
 
@@ -241,7 +246,8 @@ def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
         history_text=payload.history_text,
     )
     if not estimated_tokens.fits_context:
-        print_token_overflow_warning(estimated_tokens)
+        print_context_limit_error(estimated_tokens)
+        return False
 
     try:
         with loader("Думаю"):
@@ -249,6 +255,9 @@ def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
                 payload.request_text,
                 history_text=payload.history_text,
             )
+    except ContextLimitExceededError as error:
+        print_context_limit_error(error.breakdown)
+        return False
     except MissingAPIKeyError as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         return False
@@ -482,18 +491,27 @@ def print_token_estimate(breakdown: TokenBreakdown) -> None:
         print(status_line("Переполнение", f"+{breakdown.overflow_tokens} токенов", WARNING))
 
 
-def print_token_overflow_warning(breakdown: TokenBreakdown) -> None:
-    print(
-        colorize(
-            (
-                "Внимание: запрос, вероятно, превысит лимит модели "
-                f"на {breakdown.overflow_tokens} токенов. API может вернуть ошибку "
-                "context length / maximum context."
-            ),
-            WARNING,
-        ),
-        file=sys.stderr,
-    )
+def print_context_limit_error(breakdown: TokenBreakdown) -> None:
+    print(colorize("Запрос не отправлен: превышен лимит контекстного окна.", WARNING))
+    print()
+    print(header_line("Токены"))
+    for line in (
+        status_line("Текущий запрос", str(breakdown.current_request_tokens)),
+        status_line("История до запроса", str(breakdown.history_tokens)),
+        status_line("Prompt к модели", str(breakdown.prompt_tokens), VALUE),
+        status_line("Лимит модели", str(breakdown.context_limit)),
+        status_line("Превышение", f"+{breakdown.overflow_tokens} токенов", WARNING),
+    ):
+        print(line)
+    print()
+    print(header_line("Что можно сделать"))
+    for line in (
+        "/reset — очистить историю диалога",
+        "сократить текущий запрос или приложенный файл",
+        "использовать --range для большого файла",
+        "увеличить CODE_AGENT_CONTEXT_LIMIT, если модель реально поддерживает больший контекст",
+    ):
+        print(command_line(line))
 
 
 def format_usd(value: float) -> str:
