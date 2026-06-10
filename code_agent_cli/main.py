@@ -19,21 +19,25 @@ except ImportError:
     readline = None
 
 from code_agent_cli.agent import APIRequestError, CodeAgent, MissingAPIKeyError
+from code_agent_cli.tokens import TokenBreakdown
 
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
-DIM = "\033[2m"
-BLUE = "\033[38;5;110m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-MAGENTA = "\033[35m"
-BRIGHT_CYAN = "\033[96m"
-BRIGHT_GREEN = "\033[92m"
-ANSWER_TEXT = "\033[38;5;153m"
-ANSWER_MUTED = "\033[38;5;244m"
-ANSWER_ACCENT = "\033[38;5;110m"
-CODE_BORDER = "\033[38;5;67m"
+MUTED = "\033[38;5;245m"
+SUBTLE = "\033[38;5;239m"
+ACCENT = "\033[38;5;81m"
+ACCENT_SOFT = "\033[38;5;110m"
+USER_INPUT = "\033[38;5;214m"
+SUCCESS = "\033[38;5;114m"
+WARNING = "\033[38;5;215m"
+VALUE = "\033[38;5;159m"
+MONEY = "\033[38;5;120m"
+COMMAND = "\033[38;5;81m"
+ANSWER_TEXT = "\033[38;5;252m"
+ANSWER_MUTED = MUTED
+ANSWER_ACCENT = ACCENT_SOFT
+CODE_BORDER = "\033[38;5;60m"
 CODE_TEXT = "\033[38;5;253m"
 CODE_STRING = "\033[38;5;180m"
 CODE_NUMBER = "\033[38;5;149m"
@@ -163,9 +167,9 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 
 def run_interactive_session(agent: CodeAgent) -> None:
-    print(colorize("Code Agent CLI", BOLD + BLUE))
-    print(colorize("Команды: /help, /status, /reset, /exit", DIM))
-    print(colorize(session_summary(agent), DIM))
+    print(colorize("Code Agent CLI", BOLD + ACCENT))
+    print(colorize("Команды: /help, /status, /tokens, /reset, /exit", MUTED))
+    print(colorize(session_summary(agent), MUTED))
 
     while True:
         try:
@@ -191,8 +195,16 @@ def run_interactive_session(agent: CodeAgent) -> None:
             print_help()
             continue
 
-        if text == "/status":
+        command, _, argument = text.partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+
+        if command == "/status":
             print_status(agent)
+            continue
+
+        if command in {"/tokens", "/token"}:
+            print_current_token_state(agent, argument or None)
             continue
 
         send(agent, text)
@@ -224,6 +236,12 @@ def build_prompt(args: argparse.Namespace) -> PromptPayload:
 
 def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
     payload = normalize_prompt(prompt)
+    estimated_tokens = agent.estimate_tokens(
+        payload.request_text,
+        history_text=payload.history_text,
+    )
+    if not estimated_tokens.fits_context:
+        print_token_overflow_warning(estimated_tokens)
 
     try:
         with loader("Думаю"):
@@ -243,6 +261,8 @@ def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
 
     print()
     print_agent_answer(answer)
+    print()
+    print_last_token_report(agent)
     print()
     return True
 
@@ -299,6 +319,8 @@ def print_help() -> None:
         (
             ("/help", "показать помощь"),
             ("/status", "показать настройки текущей сессии"),
+            ("/tokens", "показать токены истории и последнего запроса"),
+            ("/tokens текст", "посчитать токены текста без отправки в API"),
             ("/reset", "очистить сохраненную историю"),
             ("/exit", "выйти"),
         )
@@ -318,19 +340,19 @@ def print_command_help(commands: tuple[tuple[str, str], ...]) -> None:
         if not use_color():
             print(f"  {command:<{width}}  {description}")
             continue
-        print(f"  {GREEN}{command:<{width}}{RESET}  {BLUE}{description}{RESET}")
+        print(f"  {COMMAND}{command:<{width}}{RESET}  {MUTED}{description}{RESET}")
 
 
 def header_line(text: str) -> str:
     if not use_color():
         return f"{text}:"
-    return f"{DIM}{text}:{RESET}"
+    return f"{ACCENT}{BOLD}{text}{RESET}{SUBTLE}:{RESET}"
 
 
 def command_line(text: str) -> str:
     if not use_color():
         return f"  {text}"
-    return f"  {BRIGHT_CYAN}{text}{RESET}"
+    return f"  {COMMAND}{text}{RESET}"
 
 
 def print_status(agent: CodeAgent) -> None:
@@ -342,27 +364,36 @@ def print_status(agent: CodeAgent) -> None:
     for line in (
         status_line("Модель", str(status["model"])),
         status_line("Temperature", str(status["temperature"])),
+        status_line("Лимит контекста", f"{status['context_limit']} токенов"),
         status_line("История", f"{history} сообщений"),
+        status_line("Токены истории", str(status["current_history_tokens"])),
+        status_line("Остаток контекста", str(status["remaining_context_tokens"])),
         status_line("Файл истории", str(status["history_file"])),
         status_line("Состояние истории", history_loaded),
         status_line("API URL", str(status["api_url"])),
         status_line(
             "DEEPSEEK_API_KEY",
             api_key_status,
-            GREEN if status["api_key_configured"] else YELLOW,
+            SUCCESS if status["api_key_configured"] else WARNING,
         ),
         "",
-        status_line("Токены сессии", str(status["session_total_tokens"]), BRIGHT_GREEN),
+        status_line("Токены сессии", str(status["session_total_tokens"]), VALUE),
         status_line("Prompt", str(status["session_prompt_tokens"])),
         status_line("Answer", str(status["session_completion_tokens"])),
     ):
         print(line)
 
+    if agent.last_token_breakdown is None:
+        print(status_line("Последний запрос", "ещё не отправлялся", WARNING))
+    else:
+        print()
+        print_last_token_report(agent)
 
-def status_line(label: str, value: str, value_color: str = BLUE) -> str:
+
+def status_line(label: str, value: str, value_color: str = VALUE) -> str:
     if not use_color():
         return f"{label}: {value}"
-    return f"{DIM}{label}:{RESET} {value_color}{value}{RESET}"
+    return f"{MUTED}{label}{SUBTLE}:{RESET} {value_color}{value}{RESET}"
 
 
 def session_summary(agent: CodeAgent) -> str:
@@ -370,8 +401,107 @@ def session_summary(agent: CodeAgent) -> str:
     return (
         f"Модель: {status['model']} · "
         f"История: {status['history_messages']}/{status['max_history_messages']} · "
+        f"Контекст: {status['current_history_tokens']}/{status['context_limit']} токенов · "
         f"{'загружена' if status['history_loaded'] else 'новая'}"
     )
+
+
+def print_current_token_state(agent: CodeAgent, request_text: str | None = None) -> None:
+    status = agent.status()
+    print(header_line("Текущие токены"))
+    for line in (
+        status_line("Вся история диалога", str(status["current_history_tokens"])),
+        status_line("Лимит модели", str(status["context_limit"])),
+        status_line("Остаток", str(status["remaining_context_tokens"])),
+        status_line("Сессия total", str(status["session_total_tokens"]), VALUE),
+        status_line("Сессия prompt", str(status["session_prompt_tokens"])),
+        status_line("Сессия answer", str(status["session_completion_tokens"])),
+    ):
+        print(line)
+
+    if request_text:
+        print()
+        print_token_estimate(agent.estimate_tokens(request_text))
+        return
+
+    if agent.last_token_breakdown is not None:
+        print()
+        print_last_token_report(agent)
+    else:
+        print(status_line("Последний запрос", "ещё не отправлялся", WARNING))
+
+
+def print_last_token_report(agent: CodeAgent) -> None:
+    breakdown = agent.last_token_breakdown
+    if breakdown is None:
+        return
+
+    usage = agent.last_actual_usage
+    actual_prompt = int(usage.get("prompt_tokens") or 0)
+    actual_answer = int(usage.get("completion_tokens") or 0)
+    actual_total = int(usage.get("total_tokens") or 0)
+    full_history_tokens = agent.token_counter.count_messages(agent.messages)
+
+    print(header_line("Токены"))
+    print(status_line("Текущий запрос", f"{breakdown.current_request_tokens} (локальная оценка)"))
+    print(status_line("Вся история диалога", f"{full_history_tokens} (локальная оценка)"))
+    if actual_total:
+        print(status_line("Ответ модели", f"{actual_answer} (API)", SUCCESS))
+        print()
+        print(header_line("Детали API"))
+        print(status_line("Prompt целиком", str(actual_prompt), VALUE))
+        print(status_line("Total", str(actual_total), VALUE))
+        prompt_cost = actual_prompt * agent.input_price_per_1m / 1_000_000
+        answer_cost = actual_answer * agent.output_price_per_1m / 1_000_000
+        print(status_line("Стоимость prompt API", format_usd(prompt_cost), MONEY))
+        print(status_line("Стоимость answer", format_usd(answer_cost), MONEY))
+        print(status_line("Стоимость total", format_usd(prompt_cost + answer_cost), MONEY + BOLD))
+    else:
+        print(status_line("Ответ модели", "нет данных usage от API", WARNING))
+        print()
+        print(header_line("Детали оценки"))
+        print(status_line("Prompt целиком", str(breakdown.prompt_tokens)))
+        print(status_line("Стоимость prompt оценка", format_usd(breakdown.input_cost_usd)))
+    if not breakdown.fits_context:
+        print(status_line("Переполнение", f"+{breakdown.overflow_tokens} токенов", WARNING))
+
+
+def print_token_estimate(breakdown: TokenBreakdown) -> None:
+    print(header_line("Оценка токенов"))
+    for line in (
+        status_line("Текущий запрос", str(breakdown.current_request_tokens)),
+        status_line("История до запроса", str(breakdown.history_tokens)),
+        status_line("Prompt к модели", str(breakdown.prompt_tokens), VALUE),
+        status_line("Лимит модели", str(breakdown.context_limit)),
+        status_line("Остаток контекста", str(breakdown.remaining_context_tokens)),
+        status_line("Стоимость prompt", format_usd(breakdown.input_cost_usd), MONEY),
+    ):
+        print(line)
+
+    if not breakdown.fits_context:
+        print(status_line("Переполнение", f"+{breakdown.overflow_tokens} токенов", WARNING))
+
+
+def print_token_overflow_warning(breakdown: TokenBreakdown) -> None:
+    print(
+        colorize(
+            (
+                "Внимание: запрос, вероятно, превысит лимит модели "
+                f"на {breakdown.overflow_tokens} токенов. API может вернуть ошибку "
+                "context length / maximum context."
+            ),
+            WARNING,
+        ),
+        file=sys.stderr,
+    )
+
+
+def format_usd(value: float) -> str:
+    if value < 0.0001:
+        return f"${value:.6f}"
+    if value < 0.01:
+        return f"${value:.4f}"
+    return f"${value:.2f}"
 
 
 def read_attached_file(
@@ -455,7 +585,7 @@ def confirm_large_file(file_path: Path, file_size: int, max_file_bytes: int) -> 
         )
         return False
 
-    answer = input(colorize(message, YELLOW)).strip().lower()
+    answer = input(colorize(message, WARNING)).strip().lower()
     reset_terminal_color()
     return answer in {"y", "yes", "д", "да"}
 
@@ -759,7 +889,7 @@ def split_comment(line: str) -> tuple[str, str]:
 def prompt() -> str:
     if not use_color():
         return "> "
-    return GREEN + "> "
+    return ACCENT + "> " + USER_INPUT
 
 
 def colorize(text: str, color: str) -> str:

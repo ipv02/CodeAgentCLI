@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from code_agent_cli.storage import HistoryStorage, default_history_file
+from code_agent_cli.tokens import ModelTokenConfig, TokenBreakdown, TokenCounter
 
 
 SYSTEM_PROMPT = """
@@ -92,11 +93,30 @@ class CodeAgent:
     max_history_messages: int = field(
         default_factory=lambda: env_int("CODE_AGENT_MAX_HISTORY", 20)
     )
+    context_limit: int = field(
+        default_factory=lambda: env_int("CODE_AGENT_CONTEXT_LIMIT", 64_000)
+    )
+    input_price_per_1m: float = field(
+        default_factory=lambda: env_float("CODE_AGENT_INPUT_PRICE_PER_1M", 0.28)
+    )
+    output_price_per_1m: float = field(
+        default_factory=lambda: env_float("CODE_AGENT_OUTPUT_PRICE_PER_1M", 0.42)
+    )
     temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
     history_file: Path = field(default_factory=default_history_file)
 
     def __post_init__(self) -> None:
         self.token_usage = TokenUsage()
+        self.token_counter = TokenCounter(
+            self.model,
+            ModelTokenConfig(
+                context_limit=self.context_limit,
+                input_price_per_1m=self.input_price_per_1m,
+                output_price_per_1m=self.output_price_per_1m,
+            ),
+        )
+        self.last_token_breakdown: TokenBreakdown | None = None
+        self.last_actual_usage: dict[str, Any] = {}
         self.history_storage = HistoryStorage(self.history_file)
         self.history_loaded = False
         self.messages = self._load_history()
@@ -114,11 +134,16 @@ class CodeAgent:
 
         try:
             request_messages = self._request_messages(user_message, text)
+            self.last_token_breakdown = self.token_counter.build_breakdown(
+                request_messages,
+                text,
+            )
             answer, usage = self._perform_request(request_messages)
         except Exception:
             self.messages = [message for message in self.messages if message != user_message]
             raise
 
+        self.last_actual_usage = usage
         self.token_usage.add(usage)
         self.messages.append(self._message("assistant", answer))
         self._trim_history_if_needed()
@@ -126,11 +151,15 @@ class CodeAgent:
         return answer
 
     def status(self) -> dict[str, str | int | float | bool]:
+        current_history_tokens = self.token_counter.count_messages(self.messages)
         return {
             "api_key_configured": bool(self.api_key),
             "api_url": self.api_url,
             "model": self.model,
             "temperature": self.temperature,
+            "context_limit": self.context_limit,
+            "current_history_tokens": current_history_tokens,
+            "remaining_context_tokens": self.context_limit - current_history_tokens,
             "history_messages": max(len(self.messages) - 1, 0),
             "max_history_messages": self.max_history_messages,
             "session_total_tokens": self.token_usage.total_tokens,
@@ -139,6 +168,13 @@ class CodeAgent:
             "history_file": str(self.history_storage.path),
             "history_loaded": self.history_loaded,
         }
+
+    def estimate_tokens(self, text: str, history_text: str | None = None) -> TokenBreakdown:
+        user_message = self._message("user", history_text or text)
+        request_messages = self._trimmed_messages([*self.messages, user_message])
+        if history_text and history_text != text:
+            request_messages[-1] = self._message("user", text)
+        return self.token_counter.build_breakdown(request_messages, text)
 
     def reset_history(self) -> None:
         self.messages = self._initial_messages()
@@ -179,12 +215,15 @@ class CodeAgent:
         return content or response_text or "Нет ответа", usage
 
     def _trim_history_if_needed(self) -> None:
-        if len(self.messages) <= self.max_history_messages + 1:
-            return
+        self.messages = self._trimmed_messages(self.messages)
 
-        system_message = self.messages[0]
-        recent_messages = self.messages[-self.max_history_messages:]
-        self.messages = [system_message, *recent_messages]
+    def _trimmed_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        if len(messages) <= self.max_history_messages + 1:
+            return messages
+
+        system_message = messages[0]
+        recent_messages = messages[-self.max_history_messages:]
+        return [system_message, *recent_messages]
 
     def _load_history(self) -> list[dict[str, str]]:
         messages = self.history_storage.load()

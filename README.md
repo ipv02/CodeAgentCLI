@@ -56,6 +56,8 @@ code-agent
 ```text
 /help
 /status
+/tokens
+/tokens проверь этот запрос без отправки
 /reset
 /exit
 /quit
@@ -103,6 +105,31 @@ code-agent --file big_file.py --max-file-bytes 200000 "проверь файл"
 
 Содержимое приложенного файла не сохраняется целиком в историю диалога.
 
+## Токены и стоимость
+
+CLI считает токены локально перед запросом и сверяет их с `usage`, который возвращает API:
+
+- текущий запрос;
+- вся история диалога вместе с system prompt;
+- prompt tokens;
+- answer tokens;
+- примерная стоимость input/output.
+
+После ответа показывается отчет по токенам: оценка текущего запроса и истории,
+а также фактический `usage` от модели: prompt, answer и total.
+
+В интерактивном режиме доступны команды:
+
+```text
+/tokens
+/tokens текст запроса
+```
+
+/tokens показывает текущую историю и последний запрос. `/tokens текст запроса`
+считает токены для нового запроса без отправки в модель.
+
+Если прогноз превышает лимит контекста, CLI предупредит перед отправкой. На реальном API такой запрос обычно ломается ошибкой вида `maximum context length`: модель не получает промпт целиком и ответ не генерируется, пока историю не сократить, не суммаризировать или не отбросить часть контекста.
+
 ## Shortcut
 
 Чтобы запускать `code-agent` без ручной активации `.venv`, добавьте в `~/.zshrc`:
@@ -125,6 +152,9 @@ source ~/.zshrc
 export CODE_AGENT_MODEL="deepseek-v4-flash"
 export CODE_AGENT_TEMPERATURE="0.2"
 export CODE_AGENT_MAX_HISTORY="20"
+export CODE_AGENT_CONTEXT_LIMIT="64000"
+export CODE_AGENT_INPUT_PRICE_PER_1M="0.28"
+export CODE_AGENT_OUTPUT_PRICE_PER_1M="0.42"
 export CODE_AGENT_MAX_FILE_BYTES="122880"
 export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 ```
@@ -136,11 +166,19 @@ export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 ```
 
 `/status` также показывает токены текущей сессии: total, prompt, answer.
-Там же отображается путь к файлу истории и была ли история загружена при старте.
+Там же отображается путь к файлу истории, была ли история загружена при старте,
+текущий размер истории в токенах и остаток контекста модели.
 
 ## Разработка
 
 ```bash
 python -m pip install -e .
 python -m compileall code_agent_cli
+```
+
+Если `code-agent` запускается из уже установленного пакета и не видит новые команды,
+переустановите локальную версию:
+
+```bash
+python -m pip install -e .
 ```
