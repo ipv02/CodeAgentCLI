@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
-HISTORY_VERSION = 1
+HISTORY_VERSION = 2
+
+
+@dataclass(frozen=True)
+class HistoryState:
+    messages: list[dict[str, str]]
+    summary: str = ""
+    compression: dict[str, Any] | None = None
 
 
 def default_history_file() -> Path:
@@ -21,7 +29,7 @@ class HistoryStorage:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or default_history_file()
 
-    def load(self) -> list[dict[str, str]] | None:
+    def load(self) -> HistoryState | None:
         try:
             raw_payload = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -43,12 +51,28 @@ class HistoryStorage:
 
         normalized_messages = [normalize_message(message) for message in messages]
         valid_messages = [message for message in normalized_messages if message is not None]
-        return valid_messages or None
+        if not valid_messages:
+            return None
 
-    def save(self, messages: list[dict[str, str]]) -> None:
+        summary = payload.get("summary")
+        compression = payload.get("compression")
+        return HistoryState(
+            messages=valid_messages,
+            summary=summary if isinstance(summary, str) else "",
+            compression=compression if isinstance(compression, dict) else None,
+        )
+
+    def save(
+        self,
+        messages: list[dict[str, str]],
+        summary: str = "",
+        compression: dict[str, Any] | None = None,
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": HISTORY_VERSION,
+            "summary": summary,
+            "compression": compression or {},
             "messages": messages,
         }
         temp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")

@@ -132,6 +132,38 @@ CLI считает токены локально перед запросом и 
 показывает, сколько токенов нужно убрать. История при этом не изменяется:
 неудачный user prompt не сохраняется как часть диалога.
 
+## Компрессия истории
+
+По умолчанию агент хранит последние `CODE_AGENT_MAX_HISTORY` сообщений как есть.
+Более старые сообщения после успешного ответа модели сжимаются в отдельный
+`summary`. В следующий запрос подставляется:
+
+```text
+system prompt
+summary старого диалога
+последние N сообщений как есть
+текущий запрос
+```
+
+Так старый контекст не теряется полностью, но prompt перестает расти бесконечно.
+`/status` и `/tokens` показывают размер summary и экономию prompt-токенов после
+последнего сжатия.
+
+Сравнить режимы можно так:
+
+```bash
+export CODE_AGENT_ENABLE_SUMMARY="false"
+code-agent
+
+export CODE_AGENT_ENABLE_SUMMARY="true"
+code-agent
+```
+
+При выключенной компрессии старые сообщения просто обрезаются по лимиту истории.
+При включенной компрессии старые сообщения заменяются summary, поэтому качество
+ответов обычно лучше на длинных диалогах, а расход токенов ниже, чем при полной
+истории без сжатия.
+
 ## Shortcut
 
 Чтобы запускать `code-agent` без ручной активации `.venv`, добавьте в `~/.zshrc`:
@@ -154,6 +186,8 @@ source ~/.zshrc
 export CODE_AGENT_MODEL="deepseek-v4-flash"
 export CODE_AGENT_TEMPERATURE="0.2"
 export CODE_AGENT_MAX_HISTORY="20"
+export CODE_AGENT_ENABLE_SUMMARY="true"
+export CODE_AGENT_SUMMARY_MAX_TOKENS="1200"
 export CODE_AGENT_CONTEXT_LIMIT="64000"
 export CODE_AGENT_INPUT_PRICE_PER_1M="0.28"
 export CODE_AGENT_OUTPUT_PRICE_PER_1M="0.42"
@@ -169,7 +203,8 @@ export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 
 `/status` также показывает токены текущей сессии: total, prompt, answer.
 Там же отображается путь к файлу истории, была ли история загружена при старте,
-текущий размер истории в токенах и остаток контекста модели.
+текущий размер истории в токенах, размер summary, последнюю экономию prompt-токенов
+и остаток контекста модели.
 
 ## Разработка
 

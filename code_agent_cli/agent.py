@@ -8,6 +8,14 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from code_agent_cli.context import (
+    CompressionConfig,
+    CompressionStats,
+    build_request_messages,
+    build_summary_update_messages,
+    compression_stats,
+    split_messages_for_compression,
+)
 from code_agent_cli.storage import HistoryStorage, default_history_file
 from code_agent_cli.tokens import ModelTokenConfig, TokenBreakdown, TokenCounter
 
@@ -84,6 +92,13 @@ def env_float(name: str, default: float) -> float:
     if not value:
         return default
 
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on", "да"}
+
     try:
         return float(value)
     except ValueError:
@@ -102,6 +117,12 @@ class CodeAgent:
     model: str = field(default_factory=lambda: os.getenv("CODE_AGENT_MODEL", "deepseek-v4-flash"))
     max_history_messages: int = field(
         default_factory=lambda: env_int("CODE_AGENT_MAX_HISTORY", 20)
+    )
+    summary_enabled: bool = field(
+        default_factory=lambda: env_bool("CODE_AGENT_ENABLE_SUMMARY", True)
+    )
+    summary_max_tokens: int = field(
+        default_factory=lambda: env_int("CODE_AGENT_SUMMARY_MAX_TOKENS", 1200)
     )
     context_limit: int = field(
         default_factory=lambda: env_int("CODE_AGENT_CONTEXT_LIMIT", 64_000)
@@ -127,6 +148,9 @@ class CodeAgent:
         )
         self.last_token_breakdown: TokenBreakdown | None = None
         self.last_actual_usage: dict[str, Any] = {}
+        self.summary = ""
+        self.last_compression = CompressionStats()
+        self.last_compression_error = ""
         self.history_storage = HistoryStorage(self.history_file)
         self.history_loaded = False
         self.messages = self._load_history()
@@ -153,18 +177,20 @@ class CodeAgent:
 
         self.last_actual_usage = usage
         self.token_usage.add(usage)
-        self.messages = self._trimmed_messages(
-            [
-                *self.messages,
-                user_message,
-                self._message("assistant", answer),
-            ]
-        )
+        self.messages = [
+            *self.messages,
+            user_message,
+            self._message("assistant", answer),
+        ]
+        self._compress_or_trim_history_if_needed()
         self._save_history()
         return answer
 
     def status(self) -> dict[str, str | int | float | bool]:
-        current_history_tokens = self.token_counter.count_messages(self.messages)
+        current_history_tokens = self.token_counter.count_messages(
+            self._messages_with_summary(self.messages)
+        )
+        summary_tokens = self.token_counter.count_text(self.summary)
         return {
             "api_key_configured": bool(self.api_key),
             "api_url": self.api_url,
@@ -175,6 +201,12 @@ class CodeAgent:
             "remaining_context_tokens": self.context_limit - current_history_tokens,
             "history_messages": max(len(self.messages) - 1, 0),
             "max_history_messages": self.max_history_messages,
+            "summary_enabled": self.summary_enabled,
+            "summary_tokens": summary_tokens,
+            "summary_max_tokens": self.summary_max_tokens,
+            "last_compressed_messages": self.last_compression.compressed_messages,
+            "last_saved_prompt_tokens": self.last_compression.saved_prompt_tokens,
+            "last_compression_error": self.last_compression_error,
             "session_total_tokens": self.token_usage.total_tokens,
             "session_prompt_tokens": self.token_usage.prompt_tokens,
             "session_completion_tokens": self.token_usage.completion_tokens,
@@ -189,15 +221,24 @@ class CodeAgent:
 
     def reset_history(self) -> None:
         self.messages = self._initial_messages()
+        self.summary = ""
+        self.last_compression = CompressionStats()
+        self.last_compression_error = ""
         self.history_loaded = False
         self._save_history()
 
-    def _perform_request(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
+    def _perform_request(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         request = Request(
             self.api_url,
             data=json.dumps(payload).encode("utf-8"),
@@ -228,6 +269,45 @@ class CodeAgent:
     def _trim_history_if_needed(self) -> None:
         self.messages = self._trimmed_messages(self.messages)
 
+    def _compress_or_trim_history_if_needed(self) -> None:
+        if not self.summary_enabled:
+            self._trim_history_if_needed()
+            return
+
+        system_message = self.messages[0]
+        visible_messages = self.messages[1:]
+        config = CompressionConfig(
+            enabled=self.summary_enabled,
+            recent_messages=self.max_history_messages,
+            summary_max_tokens=max(self.summary_max_tokens, 1),
+        )
+        messages_to_compress, recent_messages = split_messages_for_compression(
+            visible_messages,
+            config,
+        )
+        if not messages_to_compress:
+            self.messages = [system_message, *recent_messages]
+            return
+
+        summary_before = self.summary
+        messages_before = list(visible_messages)
+        try:
+            self.summary = self._summarize_messages(messages_to_compress)
+            self.last_compression = compression_stats(
+                self.token_counter,
+                system_message,
+                summary_before,
+                self.summary,
+                messages_before,
+                recent_messages,
+                len(messages_to_compress),
+            )
+            self.last_compression_error = ""
+            self.messages = [system_message, *recent_messages]
+        except Exception as error:
+            self.last_compression_error = str(error)
+            self.messages = self._trimmed_messages(self.messages)
+
     def _trimmed_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
         if len(messages) <= self.max_history_messages + 1:
             return messages
@@ -237,12 +317,14 @@ class CodeAgent:
         return [system_message, *recent_messages]
 
     def _load_history(self) -> list[dict[str, str]]:
-        messages = self.history_storage.load()
-        if messages is None:
+        state = self.history_storage.load()
+        if state is None:
             return self._initial_messages()
 
+        self.summary = state.summary
+        self.last_compression = CompressionStats.from_dict(state.compression)
         self.history_loaded = True
-        return self._normalize_history(messages)
+        return self._normalize_history(state.messages)
 
     def _normalize_history(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
         user_visible_messages = [
@@ -253,7 +335,11 @@ class CodeAgent:
         return [self._message("system", SYSTEM_PROMPT), *user_visible_messages]
 
     def _save_history(self) -> None:
-        self.history_storage.save(self.messages)
+        self.history_storage.save(
+            self.messages,
+            summary=self.summary,
+            compression=self.last_compression.to_dict(),
+        )
 
     def _initial_messages(self) -> list[dict[str, str]]:
         return [self._message("system", SYSTEM_PROMPT)]
@@ -263,10 +349,43 @@ class CodeAgent:
         history_user_message: dict[str, str],
         request_text: str,
     ) -> list[dict[str, str]]:
-        request_messages = self._trimmed_messages([*self.messages, history_user_message])
-        if history_user_message["content"] != request_text:
-            request_messages[-1] = self._message("user", request_text)
-        return request_messages
+        visible_messages = self.messages[1:]
+        if not self.summary_enabled:
+            visible_messages = self._trimmed_messages(
+                [self.messages[0], *visible_messages, history_user_message]
+            )[1:-1]
+        return build_request_messages(
+            self.messages[0],
+            self.summary if self.summary_enabled else "",
+            visible_messages,
+            history_user_message,
+            request_text,
+        )
+
+    def _messages_with_summary(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not self.summary_enabled:
+            return messages
+        return build_request_messages(
+            messages[0],
+            self.summary,
+            messages[1:],
+            self._message("user", ""),
+            "",
+        )[:-1]
+
+    def _summarize_messages(self, messages_to_compress: list[dict[str, str]]) -> str:
+        summary_messages = build_summary_update_messages(
+            SYSTEM_PROMPT,
+            self.summary,
+            messages_to_compress,
+            self.summary_max_tokens,
+        )
+        summary, usage = self._perform_request(
+            summary_messages,
+            max_tokens=self.summary_max_tokens,
+        )
+        self.token_usage.add(usage)
+        return summary.strip()
 
     @staticmethod
     def _message(role: str, content: str) -> dict[str, str]:

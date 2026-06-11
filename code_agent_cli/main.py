@@ -370,22 +370,58 @@ def print_status(agent: CodeAgent) -> None:
     history = f"{status['history_messages']} / {status['max_history_messages']}"
     history_loaded = "загружена" if status["history_loaded"] else "новая"
 
+    print(header_line("Модель"))
     for line in (
         status_line("Модель", str(status["model"])),
         status_line("Temperature", str(status["temperature"])),
-        status_line("Лимит контекста", f"{status['context_limit']} токенов"),
-        status_line("История", f"{history} сообщений"),
-        status_line("Токены истории", str(status["current_history_tokens"])),
-        status_line("Остаток контекста", str(status["remaining_context_tokens"])),
-        status_line("Файл истории", str(status["history_file"])),
-        status_line("Состояние истории", history_loaded),
         status_line("API URL", str(status["api_url"])),
         status_line(
             "DEEPSEEK_API_KEY",
             api_key_status,
             SUCCESS if status["api_key_configured"] else WARNING,
         ),
-        "",
+    ):
+        print(line)
+
+    print()
+    print(header_line("Контекст"))
+    for line in (
+        status_line("Лимит контекста", f"{status['context_limit']} токенов"),
+        status_line("Токены истории", str(status["current_history_tokens"])),
+        status_line("Остаток контекста", str(status["remaining_context_tokens"])),
+    ):
+        print(line)
+
+    print()
+    print(header_line("Компрессия"))
+    for line in (
+        status_line(
+            "Режим",
+            "включена" if status["summary_enabled"] else "выключена",
+            SUCCESS if status["summary_enabled"] else WARNING,
+        ),
+        status_line("Summary tokens", str(status["summary_tokens"])),
+        status_line("Summary max", f"{status['summary_max_tokens']} токенов"),
+        status_line("Последнее сжатие", f"{status['last_compressed_messages']} сообщений"),
+        status_line("Экономия prompt", f"{status['last_saved_prompt_tokens']} токенов", MONEY),
+    ):
+        print(line)
+
+    if status["last_compression_error"]:
+        print(status_line("Ошибка сжатия", str(status["last_compression_error"]), WARNING))
+
+    print()
+    print(header_line("История"))
+    for line in (
+        status_line("Сообщения", f"{history} сообщений"),
+        status_line("Файл истории", str(status["history_file"])),
+        status_line("Состояние истории", history_loaded),
+    ):
+        print(line)
+
+    print()
+    print(header_line("Сессия"))
+    for line in (
         status_line("Токены сессии", str(status["session_total_tokens"]), VALUE),
         status_line("Prompt", str(status["session_prompt_tokens"])),
         status_line("Answer", str(status["session_completion_tokens"])),
@@ -422,6 +458,13 @@ def print_current_token_state(agent: CodeAgent, request_text: str | None = None)
         status_line("Вся история диалога", str(status["current_history_tokens"])),
         status_line("Лимит модели", str(status["context_limit"])),
         status_line("Остаток", str(status["remaining_context_tokens"])),
+        status_line(
+            "Компрессия",
+            "включена" if status["summary_enabled"] else "выключена",
+            SUCCESS if status["summary_enabled"] else WARNING,
+        ),
+        status_line("Summary tokens", str(status["summary_tokens"])),
+        status_line("Экономия prompt", f"{status['last_saved_prompt_tokens']} токенов", MONEY),
         status_line("Сессия total", str(status["session_total_tokens"]), VALUE),
         status_line("Сессия prompt", str(status["session_prompt_tokens"])),
         status_line("Сессия answer", str(status["session_completion_tokens"])),
@@ -454,6 +497,23 @@ def print_last_token_report(agent: CodeAgent) -> None:
     print(header_line("Токены"))
     print(status_line("Текущий запрос", f"{breakdown.current_request_tokens} (локальная оценка)"))
     print(status_line("Вся история диалога", f"{full_history_tokens} (локальная оценка)"))
+    if agent.summary_enabled:
+        summary_tokens = agent.token_counter.count_text(agent.summary)
+        print(status_line("Summary", f"{summary_tokens} токенов"))
+        if agent.last_compression.compressed_messages:
+            print(
+                status_line(
+                    "Последнее сжатие",
+                    f"{agent.last_compression.compressed_messages} сообщений",
+                )
+            )
+            print(
+                status_line(
+                    "Экономия prompt",
+                    f"{agent.last_compression.saved_prompt_tokens} токенов",
+                    MONEY,
+                )
+            )
     if actual_total:
         print(status_line("Ответ модели", f"{actual_answer} (API)", SUCCESS))
         print()
