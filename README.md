@@ -123,6 +123,14 @@ CLI считает токены локально перед запросом и 
 ```text
 /tokens
 /tokens текст запроса
+/context
+/context strategy sliding
+/context strategy facts
+/context strategy branching
+/branch list
+/branch checkpoint base
+/branch create variant-a base
+/branch switch variant-a
 ```
 
 /tokens показывает текущую историю и последний запрос. `/tokens текст запроса`
@@ -132,37 +140,72 @@ CLI считает токены локально перед запросом и 
 показывает, сколько токенов нужно убрать. История при этом не изменяется:
 неудачный user prompt не сохраняется как часть диалога.
 
-## Компрессия истории
+## Стратегии контекста
 
-По умолчанию агент хранит последние `CODE_AGENT_MAX_HISTORY` сообщений как есть.
-Более старые сообщения после успешного ответа модели сжимаются в отдельный
-`summary`. В следующий запрос подставляется:
+Агент поддерживает три стратегии управления контекстом:
+
+### Sliding Window
+
+Хранит только последние `CODE_AGENT_MAX_HISTORY` сообщений. Всё более старое
+отбрасывается.
+
+```bash
+export CODE_AGENT_CONTEXT_STRATEGY="sliding"
+```
+
+Плюсы: дешево и предсказуемо. Минус: старые детали забываются.
+
+### Sticky Facts / Key-Value Memory
+
+После каждого сообщения пользователя агент обновляет отдельный JSON-блок `facts`
+с важными устойчивыми данными: цель, ограничения, предпочтения, решения,
+текущая задача, файлы и риски.
+
+В запрос отправляется:
 
 ```text
 system prompt
-summary старого диалога
+facts
 последние N сообщений как есть
 текущий запрос
 ```
 
-Так старый контекст не теряется полностью, но prompt перестает расти бесконечно.
-`/status` и `/tokens` показывают размер summary и экономию prompt-токенов после
-последнего сжатия.
+```bash
+export CODE_AGENT_CONTEXT_STRATEGY="facts"
+```
+
+Плюсы: лучше держит важные детали при длинном диалоге. Минус: нужен дополнительный
+LLM-вызов для обновления facts.
+
+### Branching
+
+Позволяет сохранять checkpoint, создавать ветки от него и продолжать диалог в
+каждой ветке независимо. Ветка хранит собственные сообщения и facts.
+
+```bash
+export CODE_AGENT_CONTEXT_STRATEGY="branching"
+```
+
+Команды:
+
+```text
+/branch list
+/branch checkpoint base
+/branch create variant-a base
+/branch create variant-b base
+/branch switch variant-a
+```
 
 Сравнить режимы можно так:
 
 ```bash
-export CODE_AGENT_ENABLE_SUMMARY="false"
-code-agent
-
-export CODE_AGENT_ENABLE_SUMMARY="true"
-code-agent
+CODE_AGENT_CONTEXT_STRATEGY=sliding code-agent
+CODE_AGENT_CONTEXT_STRATEGY=facts code-agent
+CODE_AGENT_CONTEXT_STRATEGY=branching code-agent
 ```
 
-При выключенной компрессии старые сообщения просто обрезаются по лимиту истории.
-При включенной компрессии старые сообщения заменяются summary, поэтому качество
-ответов обычно лучше на длинных диалогах, а расход токенов ниже, чем при полной
-истории без сжатия.
+`/context` показывает текущую стратегию, активную ветку, facts и токены prompt
+для текущей стратегии по сравнению со sliding window.
 
 ## Shortcut
 
@@ -186,8 +229,8 @@ source ~/.zshrc
 export CODE_AGENT_MODEL="deepseek-v4-flash"
 export CODE_AGENT_TEMPERATURE="0.2"
 export CODE_AGENT_MAX_HISTORY="20"
-export CODE_AGENT_ENABLE_SUMMARY="true"
-export CODE_AGENT_SUMMARY_MAX_TOKENS="1200"
+export CODE_AGENT_CONTEXT_STRATEGY="facts"
+export CODE_AGENT_FACTS_MAX_TOKENS="1200"
 export CODE_AGENT_CONTEXT_LIMIT="64000"
 export CODE_AGENT_INPUT_PRICE_PER_1M="0.28"
 export CODE_AGENT_OUTPUT_PRICE_PER_1M="0.42"
@@ -203,8 +246,7 @@ export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 
 `/status` также показывает токены текущей сессии: total, prompt, answer.
 Там же отображается путь к файлу истории, была ли история загружена при старте,
-текущий размер истории в токенах, размер summary, последнюю экономию prompt-токенов
-и остаток контекста модели.
+текущая стратегия контекста, активная ветка, facts и остаток контекста модели.
 
 ## Разработка
 

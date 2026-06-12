@@ -20,6 +20,7 @@ except ImportError:
 
 from code_agent_cli.agent import (
     APIRequestError,
+    CodeAgentError,
     CodeAgent,
     ContextLimitExceededError,
     MissingAPIKeyError,
@@ -173,7 +174,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
-    print(colorize("Команды: /help, /status, /tokens, /reset, /exit", MUTED))
+    print(colorize("Команды: /help, /status, /tokens, /context, /branch, /reset, /exit", MUTED))
     print(colorize(session_summary(agent), MUTED))
 
     while True:
@@ -210,6 +211,14 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command in {"/tokens", "/token"}:
             print_current_token_state(agent, argument or None)
+            continue
+
+        if command == "/context":
+            handle_context_command(agent, argument)
+            continue
+
+        if command == "/branch":
+            handle_branch_command(agent, argument)
             continue
 
         send(agent, text)
@@ -330,6 +339,12 @@ def print_help() -> None:
             ("/status", "показать настройки текущей сессии"),
             ("/tokens", "показать токены истории и последнего запроса"),
             ("/tokens текст", "посчитать токены текста без отправки в API"),
+            ("/context", "показать стратегию контекста и facts"),
+            ("/context strategy NAME", "переключить: sliding, facts, branching"),
+            ("/branch list", "показать ветки"),
+            ("/branch checkpoint NAME", "сохранить checkpoint активной ветки"),
+            ("/branch create NAME [CHECKPOINT]", "создать ветку"),
+            ("/branch switch NAME", "переключиться на ветку"),
             ("/reset", "очистить сохраненную историю"),
             ("/exit", "выйти"),
         )
@@ -393,22 +408,19 @@ def print_status(agent: CodeAgent) -> None:
         print(line)
 
     print()
-    print(header_line("Компрессия"))
+    print(header_line("Стратегия"))
     for line in (
-        status_line(
-            "Режим",
-            "включена" if status["summary_enabled"] else "выключена",
-            SUCCESS if status["summary_enabled"] else WARNING,
-        ),
-        status_line("Summary tokens", str(status["summary_tokens"])),
-        status_line("Summary max", f"{status['summary_max_tokens']} токенов"),
-        status_line("Последнее сжатие", f"{status['last_compressed_messages']} сообщений"),
-        status_line("Экономия prompt", f"{status['last_saved_prompt_tokens']} токенов", MONEY),
+        status_line("Режим", str(status["context_strategy"])),
+        status_line("Активная ветка", str(status["active_branch"])),
+        status_line("Веток", str(status["branch_count"])),
+        status_line("Facts", f"{status['facts_count']} ключей"),
+        status_line("Facts tokens", str(status["facts_tokens"])),
+        status_line("Facts max", f"{status['facts_max_tokens']} токенов"),
     ):
         print(line)
 
-    if status["last_compression_error"]:
-        print(status_line("Ошибка сжатия", str(status["last_compression_error"]), WARNING))
+    if status["last_memory_error"]:
+        print(status_line("Ошибка memory", str(status["last_memory_error"]), WARNING))
 
     print()
     print(header_line("История"))
@@ -445,6 +457,8 @@ def session_summary(agent: CodeAgent) -> str:
     status = agent.status()
     return (
         f"Модель: {status['model']} · "
+        f"Стратегия: {status['context_strategy']} · "
+        f"Ветка: {status['active_branch']} · "
         f"История: {status['history_messages']}/{status['max_history_messages']} · "
         f"Контекст: {status['current_history_tokens']}/{status['context_limit']} токенов · "
         f"{'загружена' if status['history_loaded'] else 'новая'}"
@@ -458,13 +472,9 @@ def print_current_token_state(agent: CodeAgent, request_text: str | None = None)
         status_line("Вся история диалога", str(status["current_history_tokens"])),
         status_line("Лимит модели", str(status["context_limit"])),
         status_line("Остаток", str(status["remaining_context_tokens"])),
-        status_line(
-            "Компрессия",
-            "включена" if status["summary_enabled"] else "выключена",
-            SUCCESS if status["summary_enabled"] else WARNING,
-        ),
-        status_line("Summary tokens", str(status["summary_tokens"])),
-        status_line("Экономия prompt", f"{status['last_saved_prompt_tokens']} токенов", MONEY),
+        status_line("Стратегия", str(status["context_strategy"])),
+        status_line("Активная ветка", str(status["active_branch"])),
+        status_line("Facts tokens", str(status["facts_tokens"])),
         status_line("Сессия total", str(status["session_total_tokens"]), VALUE),
         status_line("Сессия prompt", str(status["session_prompt_tokens"])),
         status_line("Сессия answer", str(status["session_completion_tokens"])),
@@ -497,23 +507,9 @@ def print_last_token_report(agent: CodeAgent) -> None:
     print(header_line("Токены"))
     print(status_line("Текущий запрос", f"{breakdown.current_request_tokens} (локальная оценка)"))
     print(status_line("Вся история диалога", f"{full_history_tokens} (локальная оценка)"))
-    if agent.summary_enabled:
-        summary_tokens = agent.token_counter.count_text(agent.summary)
-        print(status_line("Summary", f"{summary_tokens} токенов"))
-        if agent.last_compression.compressed_messages:
-            print(
-                status_line(
-                    "Последнее сжатие",
-                    f"{agent.last_compression.compressed_messages} сообщений",
-                )
-            )
-            print(
-                status_line(
-                    "Экономия prompt",
-                    f"{agent.last_compression.saved_prompt_tokens} токенов",
-                    MONEY,
-                )
-            )
+    report = agent.context_report()
+    if report["facts"]:
+        print(status_line("Facts", f"{report['facts_tokens']} токенов"))
     if actual_total:
         print(status_line("Ответ модели", f"{actual_answer} (API)", SUCCESS))
         print()
@@ -572,6 +568,91 @@ def print_context_limit_error(breakdown: TokenBreakdown) -> None:
         "увеличить CODE_AGENT_CONTEXT_LIMIT, если модель реально поддерживает больший контекст",
     ):
         print(command_line(line))
+
+
+def handle_context_command(agent: CodeAgent, argument: str) -> None:
+    parts = argument.split()
+    if not parts:
+        print_context_report(agent)
+        return
+
+    if len(parts) == 2 and parts[0] == "strategy":
+        agent.set_context_strategy(parts[1])
+        print(status_line("Стратегия", agent.context_strategy, SUCCESS))
+        return
+
+    print("Использование: /context или /context strategy sliding|facts|branching")
+
+
+def print_context_report(agent: CodeAgent) -> None:
+    report = agent.context_report()
+    print(header_line("Контекст"))
+    for line in (
+        status_line("Стратегия", str(report["strategy"])),
+        status_line("Активная ветка", str(report["active_branch"])),
+        status_line("Сообщения", f"{report['messages']} / {report['max_messages']}"),
+        status_line("Prompt tokens", str(report["prompt_tokens_current_strategy"])),
+        status_line("Sliding tokens", str(report["prompt_tokens_sliding"])),
+        status_line("Facts tokens", str(report["facts_tokens"])),
+    ):
+        print(line)
+
+    if report["last_memory_error"]:
+        print(status_line("Ошибка memory", str(report["last_memory_error"]), WARNING))
+
+    facts = report["facts"]
+    if facts:
+        print()
+        print(header_line("Facts"))
+        for key in sorted(facts):
+            print(status_line(key, facts[key]))
+
+
+def handle_branch_command(agent: CodeAgent, argument: str) -> None:
+    parts = argument.split()
+    if not parts or parts[0] == "list":
+        print_branch_report(agent)
+        return
+
+    try:
+        if len(parts) == 2 and parts[0] == "checkpoint":
+            agent.create_checkpoint(parts[1])
+            print(status_line("Checkpoint", parts[1], SUCCESS))
+            return
+        if parts[0] == "create" and len(parts) in {2, 3}:
+            agent.create_branch(parts[1], parts[2] if len(parts) == 3 else None)
+            print(status_line("Ветка создана", parts[1], SUCCESS))
+            return
+        if len(parts) == 2 and parts[0] == "switch":
+            agent.switch_branch(parts[1])
+            print(status_line("Активная ветка", parts[1], SUCCESS))
+            return
+        if len(parts) == 2 and parts[0] == "delete":
+            agent.delete_branch(parts[1])
+            print(status_line("Ветка удалена", parts[1], WARNING))
+            return
+    except CodeAgentError as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return
+
+    print(
+        "Использование: /branch list | /branch checkpoint NAME | "
+        "/branch create NAME [CHECKPOINT] | /branch switch NAME | /branch delete NAME"
+    )
+
+
+def print_branch_report(agent: CodeAgent) -> None:
+    report = agent.branch_report()
+    print(header_line("Ветки"))
+    print(status_line("Активная", str(report["active_branch"]), SUCCESS))
+    for name, branch in report["branches"].items():
+        marker = "*" if name == report["active_branch"] else " "
+        value = (
+            f"{branch['messages']} сообщений, "
+            f"{branch['facts']} facts, "
+            f"{len(branch['checkpoints'])} checkpoints"
+        )
+        print(status_line(f"{marker} {name}", value))
 
 
 def format_usd(value: float) -> str:

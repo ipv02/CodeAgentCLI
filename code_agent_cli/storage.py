@@ -6,15 +6,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from code_agent_cli.context import (
+    DEFAULT_BRANCH,
+    BranchState,
+    normalize_facts,
+    normalize_strategy,
+)
 
-HISTORY_VERSION = 2
+HISTORY_VERSION = 3
 
 
 @dataclass(frozen=True)
 class HistoryState:
-    messages: list[dict[str, str]]
-    summary: str = ""
-    compression: dict[str, Any] | None = None
+    strategy: str
+    active_branch: str
+    branches: dict[str, BranchState]
 
 
 def default_history_file() -> Path:
@@ -45,35 +51,61 @@ class HistoryStorage:
         if not isinstance(payload, dict):
             return None
 
+        strategy = normalize_strategy(payload.get("strategy"))
+        active_branch = payload.get("active_branch")
+        active_branch = active_branch if isinstance(active_branch, str) else DEFAULT_BRANCH
+
+        branches_payload = payload.get("branches")
+        if isinstance(branches_payload, dict):
+            branches = load_branches(branches_payload)
+            if branches:
+                if active_branch not in branches:
+                    active_branch = next(iter(branches))
+                return HistoryState(
+                    strategy=strategy,
+                    active_branch=active_branch,
+                    branches=branches,
+                )
+
         messages = payload.get("messages")
         if not isinstance(messages, list):
             return None
-
         normalized_messages = [normalize_message(message) for message in messages]
         valid_messages = [message for message in normalized_messages if message is not None]
         if not valid_messages:
             return None
 
         summary = payload.get("summary")
-        compression = payload.get("compression")
+        facts = normalize_facts(payload.get("facts"))
+        if isinstance(summary, str) and summary.strip():
+            facts.setdefault("legacy_summary", summary.strip())
         return HistoryState(
-            messages=valid_messages,
-            summary=summary if isinstance(summary, str) else "",
-            compression=compression if isinstance(compression, dict) else None,
+            strategy=strategy,
+            active_branch=DEFAULT_BRANCH,
+            branches={
+                DEFAULT_BRANCH: BranchState(
+                    messages=valid_messages,
+                    facts=facts,
+                    checkpoints={},
+                )
+            },
         )
 
     def save(
         self,
-        messages: list[dict[str, str]],
-        summary: str = "",
-        compression: dict[str, Any] | None = None,
+        strategy: str,
+        active_branch: str,
+        branches: dict[str, BranchState],
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": HISTORY_VERSION,
-            "summary": summary,
-            "compression": compression or {},
-            "messages": messages,
+            "strategy": normalize_strategy(strategy),
+            "active_branch": active_branch,
+            "branches": {
+                name: branch.to_dict()
+                for name, branch in branches.items()
+            },
         }
         temp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
         temp_path.write_text(
@@ -81,6 +113,27 @@ class HistoryStorage:
             encoding="utf-8",
         )
         temp_path.replace(self.path)
+
+
+def load_branches(value: dict[str, Any]) -> dict[str, BranchState]:
+    branches: dict[str, BranchState] = {}
+    for name, branch_payload in value.items():
+        if not isinstance(name, str) or not isinstance(branch_payload, dict):
+            continue
+        branch = BranchState.from_dict(branch_payload)
+        normalized_messages = [
+            normalize_message(message)
+            for message in branch.messages
+        ]
+        valid_messages = [
+            message
+            for message in normalized_messages
+            if message is not None
+        ]
+        if valid_messages:
+            branch.messages = valid_messages
+            branches[name] = branch
+    return branches
 
 
 def normalize_message(value: Any) -> dict[str, str] | None:
