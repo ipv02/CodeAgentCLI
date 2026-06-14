@@ -342,6 +342,7 @@ def print_help() -> None:
             ("/context", "показать стратегию контекста и facts"),
             ("/context strategy NAME", "переключить: sliding, facts, branching"),
             ("/branch list", "показать ветки"),
+            ("/branch compare A B", "сравнить две ветки"),
             ("/branch checkpoint NAME", "сохранить checkpoint активной ветки"),
             ("/branch create NAME [CHECKPOINT]", "создать ветку"),
             ("/branch switch NAME", "переключиться на ветку"),
@@ -627,6 +628,9 @@ def handle_branch_command(agent: CodeAgent, argument: str) -> None:
             agent.switch_branch(parts[1])
             print(status_line("Активная ветка", parts[1], SUCCESS))
             return
+        if len(parts) == 3 and parts[0] == "compare":
+            print_branch_compare(agent, parts[1], parts[2])
+            return
         if len(parts) == 2 and parts[0] == "delete":
             agent.delete_branch(parts[1])
             print(status_line("Ветка удалена", parts[1], WARNING))
@@ -636,7 +640,7 @@ def handle_branch_command(agent: CodeAgent, argument: str) -> None:
         return
 
     print(
-        "Использование: /branch list | /branch checkpoint NAME | "
+        "Использование: /branch list | /branch compare A B | /branch checkpoint NAME | "
         "/branch create NAME [CHECKPOINT] | /branch switch NAME | /branch delete NAME"
     )
 
@@ -650,9 +654,51 @@ def print_branch_report(agent: CodeAgent) -> None:
         value = (
             f"{branch['messages']} сообщений, "
             f"{branch['facts']} facts, "
+            f"{branch['prompt_tokens']} prompt tokens, "
             f"{len(branch['checkpoints'])} checkpoints"
         )
         print(status_line(f"{marker} {name}", value))
+        if branch["last_user"]:
+            print(status_line("  последний user", shorten_text(branch["last_user"], 88), MUTED))
+        if branch["current_task"]:
+            print(status_line("  current_task", shorten_text(branch["current_task"], 88), MUTED))
+        elif branch["goal"]:
+            print(status_line("  goal", shorten_text(branch["goal"], 88), MUTED))
+
+
+def print_branch_compare(agent: CodeAgent, left_name: str, right_name: str) -> None:
+    report = agent.compare_branches(left_name, right_name)
+    left = report["left"]
+    right = report["right"]
+
+    print(header_line("Сравнение веток"))
+    print(status_line("Левая", str(report["left_name"]), SUCCESS))
+    print(status_line("Правая", str(report["right_name"]), SUCCESS))
+    print()
+    print(header_line("Размер контекста"))
+    print(status_line(str(report["left_name"]), f"{left['prompt_tokens']} prompt tokens"))
+    print(status_line(str(report["right_name"]), f"{right['prompt_tokens']} prompt tokens"))
+    print()
+    print(header_line("Последний user"))
+    print(status_line(str(report["left_name"]), shorten_text(left["last_user"], 120)))
+    print(status_line(str(report["right_name"]), shorten_text(right["last_user"], 120)))
+
+    if left["current_task"] or right["current_task"] or left["goal"] or right["goal"]:
+        print()
+        print(header_line("Смысл ветки"))
+        print(status_line(str(report["left_name"]), shorten_text(left["current_task"] or left["goal"], 120)))
+        print(status_line(str(report["right_name"]), shorten_text(right["current_task"] or right["goal"], 120)))
+
+    facts_diff = report["facts_diff"]
+    if facts_diff:
+        print()
+        print(header_line("Разные facts"))
+        for key, diff in facts_diff.items():
+            print(status_line(f"{key} / {report['left_name']}", shorten_text(diff["left"], 110), MUTED))
+            print(status_line(f"{key} / {report['right_name']}", shorten_text(diff["right"], 110), MUTED))
+    else:
+        print()
+        print(status_line("Facts", "одинаковые", WARNING))
 
 
 def format_usd(value: float) -> str:
@@ -1043,6 +1089,13 @@ def split_comment(line: str) -> tuple[str, str]:
         index += 1
 
     return line, ""
+
+
+def shorten_text(text: str, width: int) -> str:
+    normalized = " ".join(str(text).split())
+    if not normalized:
+        return "—"
+    return textwrap.shorten(normalized, width=width, placeholder="…")
 
 
 def prompt() -> str:

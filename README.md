@@ -128,6 +128,7 @@ CLI считает токены локально перед запросом и 
 /context strategy facts
 /context strategy branching
 /branch list
+/branch compare variant-a variant-b
 /branch checkpoint base
 /branch create variant-a base
 /branch switch variant-a
@@ -190,6 +191,7 @@ export CODE_AGENT_CONTEXT_STRATEGY="branching"
 
 ```text
 /branch list
+/branch compare variant-a variant-b
 /branch checkpoint base
 /branch create variant-a base
 /branch create variant-b base
@@ -205,7 +207,9 @@ CODE_AGENT_CONTEXT_STRATEGY=branching code-agent
 ```
 
 `/context` показывает текущую стратегию, активную ветку, facts и токены prompt
-для текущей стратегии по сравнению со sliding window.
+для текущей стратегии по сравнению со sliding window. `/branch compare A B`
+показывает разницу между ветками: последний user prompt, смысл ветки, prompt
+tokens и отличающиеся facts.
 
 ## Shortcut
 

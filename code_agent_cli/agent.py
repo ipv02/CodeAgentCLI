@@ -457,15 +457,74 @@ class CodeAgent:
         return {
             "active_branch": self.active_branch,
             "branches": {
-                name: {
-                    "messages": max(len(branch.messages) - 1, 0),
-                    "facts": len(branch.facts),
-                    "checkpoints": sorted(branch.checkpoints),
-                }
+                name: self._branch_summary(branch)
                 for name, branch in sorted(self.branches.items())
             },
             "active_checkpoints": sorted(active.checkpoints),
         }
+
+    def compare_branches(self, left_name: str, right_name: str) -> dict[str, Any]:
+        if left_name not in self.branches:
+            raise CodeAgentError(f"Ветка не найдена: {left_name}")
+        if right_name not in self.branches:
+            raise CodeAgentError(f"Ветка не найдена: {right_name}")
+
+        left = self.branches[left_name]
+        right = self.branches[right_name]
+        return {
+            "left_name": left_name,
+            "right_name": right_name,
+            "left": self._branch_summary(left),
+            "right": self._branch_summary(right),
+            "facts_diff": self._facts_diff(left.facts, right.facts),
+        }
+
+    def _branch_summary(self, branch: BranchState) -> dict[str, Any]:
+        request_messages = self._messages_with_branch_memory(branch)
+        return {
+            "messages": max(len(branch.messages) - 1, 0),
+            "facts": len(branch.facts),
+            "facts_values": dict(branch.facts),
+            "checkpoints": sorted(branch.checkpoints),
+            "prompt_tokens": self.token_counter.count_messages(request_messages),
+            "last_user": self._last_message_content(branch.messages, "user"),
+            "last_assistant": self._last_message_content(branch.messages, "assistant"),
+            "current_task": branch.facts.get("current_task", ""),
+            "goal": branch.facts.get("goal", ""),
+        }
+
+    def _messages_with_branch_memory(self, branch: BranchState) -> list[dict[str, str]]:
+        facts = branch.facts if self.context_strategy in {FACTS_STRATEGY, BRANCHING_STRATEGY} else {}
+        return build_request_messages(
+            branch.messages[0],
+            facts,
+            trim_visible_messages(branch.messages[1:], self.max_history_messages),
+            self._message("user", ""),
+            "",
+        )[:-1]
+
+    @staticmethod
+    def _last_message_content(messages: list[dict[str, str]], role: str) -> str:
+        for message in reversed(messages):
+            if message.get("role") == role:
+                return message.get("content", "")
+        return ""
+
+    @staticmethod
+    def _facts_diff(
+        left: dict[str, str],
+        right: dict[str, str],
+    ) -> dict[str, dict[str, str]]:
+        diff: dict[str, dict[str, str]] = {}
+        for key in sorted(set(left) | set(right)):
+            left_value = left.get(key, "")
+            right_value = right.get(key, "")
+            if left_value != right_value:
+                diff[key] = {
+                    "left": left_value,
+                    "right": right_value,
+                }
+        return diff
 
     @staticmethod
     def _message(role: str, content: str) -> dict[str, str]:
