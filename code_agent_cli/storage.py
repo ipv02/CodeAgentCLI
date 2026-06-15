@@ -12,8 +12,9 @@ from code_agent_cli.context import (
     normalize_facts,
     normalize_strategy,
 )
+from code_agent_cli.memory import MemoryState
 
-HISTORY_VERSION = 3
+HISTORY_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ class HistoryStorage:
             branches={
                 DEFAULT_BRANCH: BranchState(
                     messages=valid_messages,
-                    facts=facts,
+                    memory=MemoryState.from_legacy_facts(facts),
                     checkpoints={},
                 )
             },

@@ -11,15 +11,20 @@ from urllib.request import Request, urlopen
 from code_agent_cli.context import (
     BRANCHING_STRATEGY,
     DEFAULT_BRANCH,
-    FACTS_STRATEGY,
+    MEMORY_STRATEGY,
     BranchState,
     branch_from_checkpoint,
-    build_facts_update_messages,
     build_request_messages,
     checkpoint_state,
     normalize_strategy,
-    parse_facts_response,
     trim_visible_messages,
+)
+from code_agent_cli.memory import (
+    MemoryState,
+    ProfileStorage,
+    build_memory_update_messages,
+    default_profile_file,
+    parse_memory_update_response,
 )
 from code_agent_cli.storage import HistoryStorage, default_history_file
 from code_agent_cli.tokens import ModelTokenConfig, TokenBreakdown, TokenCounter
@@ -103,6 +108,22 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on", "да"}
+
+
+def normalize_memory_layer_name(value: str) -> str:
+    layer = value.strip().lower()
+    if layer in {"working", "work"}:
+        return "working"
+    if layer in {"long", "long-term", "long_term"}:
+        return "long_term"
+    raise CodeAgentError("Слой памяти должен быть working или long.")
+
+
 @dataclass
 class CodeAgent:
     api_key: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""))
@@ -119,8 +140,11 @@ class CodeAgent:
     context_strategy: str = field(
         default_factory=lambda: normalize_strategy(os.getenv("CODE_AGENT_CONTEXT_STRATEGY"))
     )
-    facts_max_tokens: int = field(
-        default_factory=lambda: env_int("CODE_AGENT_FACTS_MAX_TOKENS", 1200)
+    memory_max_tokens: int = field(
+        default_factory=lambda: env_int("CODE_AGENT_MEMORY_MAX_TOKENS", 1200)
+    )
+    auto_memory_updates: bool = field(
+        default_factory=lambda: env_bool("CODE_AGENT_AUTO_MEMORY", False)
     )
     context_limit: int = field(
         default_factory=lambda: env_int("CODE_AGENT_CONTEXT_LIMIT", 64_000)
@@ -133,8 +157,11 @@ class CodeAgent:
     )
     temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
     history_file: Path = field(default_factory=default_history_file)
+    profile_file: Path = field(default_factory=default_profile_file)
 
     def __post_init__(self) -> None:
+        self.history_file = Path(self.history_file)
+        self.profile_file = Path(self.profile_file)
         self.token_usage = TokenUsage()
         self.token_counter = TokenCounter(
             self.model,
@@ -148,10 +175,12 @@ class CodeAgent:
         self.last_actual_usage: dict[str, Any] = {}
         self.last_memory_error = ""
         self.history_storage = HistoryStorage(self.history_file)
+        self.profile_storage = ProfileStorage(self.profile_file)
         self.history_loaded = False
         self.branches: dict[str, BranchState] = {}
         self.active_branch = DEFAULT_BRANCH
         self.messages = self._load_history()
+        self._load_profile_memory()
         self._trim_history_if_needed()
 
     def send_message(self, text: str, history_text: str | None = None) -> str:
@@ -171,7 +200,7 @@ class CodeAgent:
                 'Не задан DEEPSEEK_API_KEY. Выполните: export DEEPSEEK_API_KEY="ваш_ключ"'
             )
 
-        self._update_facts_if_needed(text)
+        self._update_memory_if_needed(text)
         request_messages = self._request_messages_for_user_message(user_message, text)
         self.last_token_breakdown = self.token_counter.build_breakdown(
             request_messages,
@@ -197,11 +226,7 @@ class CodeAgent:
         current_history_tokens = self.token_counter.count_messages(
             self._messages_with_memory(self.messages)
         )
-        facts_tokens = (
-            self.token_counter.count_text(json.dumps(self.facts, ensure_ascii=False))
-            if self.facts
-            else 0
-        )
+        memory_tokens = self._memory_tokens(self.memory)
         return {
             "api_key_configured": bool(self.api_key),
             "api_url": self.api_url,
@@ -215,14 +240,18 @@ class CodeAgent:
             "context_strategy": self.context_strategy,
             "active_branch": self.active_branch,
             "branch_count": len(self.branches),
-            "facts_count": len(self.facts),
-            "facts_tokens": facts_tokens,
-            "facts_max_tokens": self.facts_max_tokens,
+            "working_memory_count": len(self.memory.working),
+            "long_term_memory_count": len(self.memory.long_term),
+            "memory_tokens": memory_tokens,
+            "memory_count": len(self.memory.working) + len(self.memory.long_term),
+            "memory_max_tokens": self.memory_max_tokens,
+            "auto_memory_updates": self.auto_memory_updates,
             "last_memory_error": self.last_memory_error,
             "session_total_tokens": self.token_usage.total_tokens,
             "session_prompt_tokens": self.token_usage.prompt_tokens,
             "session_completion_tokens": self.token_usage.completion_tokens,
             "history_file": str(self.history_storage.path),
+            "profile_file": str(self.profile_storage.path),
             "history_loaded": self.history_loaded,
         }
 
@@ -237,13 +266,14 @@ class CodeAgent:
         }
         self.active_branch = DEFAULT_BRANCH
         self.messages = self.branches[self.active_branch].messages
+        self.memory.long_term = self.profile_storage.load()
         self.last_memory_error = ""
         self.history_loaded = False
         self._save_history()
 
     @property
-    def facts(self) -> dict[str, str]:
-        return self.branches[self.active_branch].facts
+    def memory(self) -> MemoryState:
+        return self.branches[self.active_branch].memory
 
     def _perform_request(
         self,
@@ -340,35 +370,41 @@ class CodeAgent:
             self.messages[1:],
             self.max_history_messages,
         )
-        facts = self.facts if self.context_strategy in {FACTS_STRATEGY, BRANCHING_STRATEGY} else {}
+        memory = self.memory if self.context_strategy in {MEMORY_STRATEGY, BRANCHING_STRATEGY} else MemoryState()
         return build_request_messages(
             self.messages[0],
-            facts,
+            memory,
             recent_messages,
             history_user_message,
             request_text,
         )
 
     def _messages_with_memory(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
-        facts = self.facts if self.context_strategy in {FACTS_STRATEGY, BRANCHING_STRATEGY} else {}
+        memory = self.memory if self.context_strategy in {MEMORY_STRATEGY, BRANCHING_STRATEGY} else MemoryState()
         return build_request_messages(
             messages[0],
-            facts,
+            memory,
             trim_visible_messages(messages[1:], self.max_history_messages),
             self._message("user", ""),
             "",
         )[:-1]
 
-    def _update_facts_if_needed(self, user_text: str) -> None:
-        if self.context_strategy not in {FACTS_STRATEGY, BRANCHING_STRATEGY}:
+    def _update_memory_if_needed(self, user_text: str) -> None:
+        if self.context_strategy not in {MEMORY_STRATEGY, BRANCHING_STRATEGY}:
+            return
+        if not self.auto_memory_updates:
             return
 
         try:
-            facts_text, usage = self._perform_request(
-                build_facts_update_messages(self.facts, user_text),
-                max_tokens=self.facts_max_tokens,
+            memory_text, usage = self._perform_request(
+                build_memory_update_messages(self.memory, user_text),
+                max_tokens=self.memory_max_tokens,
             )
-            self.branches[self.active_branch].facts = parse_facts_response(facts_text)
+            update = parse_memory_update_response(memory_text)
+            self.branches[self.active_branch].memory.apply_update(update)
+            if update.long_term:
+                self._sync_long_term_memory()
+                self.profile_storage.save(self.memory.long_term)
             self.token_usage.add(usage)
             self.last_memory_error = ""
         except Exception as error:
@@ -383,6 +419,22 @@ class CodeAgent:
             self.active_branch = next(iter(self.branches))
         branch = self.branches[self.active_branch]
         branch.messages = self._normalize_history(branch.messages)
+
+    def _load_profile_memory(self) -> None:
+        profile_memory = self.profile_storage.load()
+        had_history_long_term = any(
+            branch.memory.long_term
+            for branch in self.branches.values()
+        )
+        for branch in self.branches.values():
+            branch.memory.long_term = dict(profile_memory)
+        if had_history_long_term:
+            self._save_history()
+
+    def _sync_long_term_memory(self) -> None:
+        long_term = dict(self.memory.long_term)
+        for branch in self.branches.values():
+            branch.memory.long_term = dict(long_term)
 
     def set_context_strategy(self, strategy: str) -> None:
         self.context_strategy = normalize_strategy(strategy)
@@ -408,7 +460,7 @@ class CodeAgent:
         else:
             self.branches[name] = BranchState(
                 messages=[dict(message) for message in source.messages],
-                facts=dict(source.facts),
+                memory=MemoryState.from_dict(source.memory.to_dict()),
                 checkpoints={},
             )
         self._save_history()
@@ -419,6 +471,9 @@ class CodeAgent:
         self.branches[self.active_branch].messages = self.messages
         self.active_branch = name
         self.messages = self.branches[self.active_branch].messages
+        self.branches[self.active_branch].memory.long_term = dict(
+            self.profile_storage.load()
+        )
         self._save_history()
 
     def delete_branch(self, name: str) -> None:
@@ -439,12 +494,10 @@ class CodeAgent:
             "strategy": self.context_strategy,
             "active_branch": self.active_branch,
             "branches": self.branch_list(),
-            "facts": dict(self.facts),
-            "facts_tokens": (
-                self.token_counter.count_text(json.dumps(self.facts, ensure_ascii=False))
-                if self.facts
-                else 0
-            ),
+            "memory": self.memory.to_dict(),
+            "working_memory": dict(self.memory.working),
+            "long_term_memory": dict(self.memory.long_term),
+            "memory_tokens": self._memory_tokens(self.memory),
             "prompt_tokens_current_strategy": self.token_counter.count_messages(request_messages),
             "prompt_tokens_sliding": self.token_counter.count_messages(sliding_messages),
             "messages": max(len(self.messages) - 1, 0),
@@ -476,32 +529,76 @@ class CodeAgent:
             "right_name": right_name,
             "left": self._branch_summary(left),
             "right": self._branch_summary(right),
-            "facts_diff": self._facts_diff(left.facts, right.facts),
+            "memory_diff": self._memory_diff(
+                left.memory.combined(),
+                right.memory.combined(),
+            ),
         }
 
     def _branch_summary(self, branch: BranchState) -> dict[str, Any]:
         request_messages = self._messages_with_branch_memory(branch)
         return {
             "messages": max(len(branch.messages) - 1, 0),
-            "facts": len(branch.facts),
-            "facts_values": dict(branch.facts),
+            "memory_count": len(branch.memory.combined()),
+            "memory": branch.memory.to_dict(),
+            "working_memory": dict(branch.memory.working),
+            "long_term_memory": dict(branch.memory.long_term),
             "checkpoints": sorted(branch.checkpoints),
             "prompt_tokens": self.token_counter.count_messages(request_messages),
             "last_user": self._last_message_content(branch.messages, "user"),
             "last_assistant": self._last_message_content(branch.messages, "assistant"),
-            "current_task": branch.facts.get("current_task", ""),
-            "goal": branch.facts.get("goal", ""),
+            "current_task": branch.memory.working.get("current_task", ""),
+            "goal": branch.memory.working.get("goal", ""),
         }
 
     def _messages_with_branch_memory(self, branch: BranchState) -> list[dict[str, str]]:
-        facts = branch.facts if self.context_strategy in {FACTS_STRATEGY, BRANCHING_STRATEGY} else {}
+        memory = branch.memory if self.context_strategy in {MEMORY_STRATEGY, BRANCHING_STRATEGY} else MemoryState()
         return build_request_messages(
             branch.messages[0],
-            facts,
+            memory,
             trim_visible_messages(branch.messages[1:], self.max_history_messages),
             self._message("user", ""),
             "",
         )[:-1]
+
+    def clear_working_memory(self) -> None:
+        self.memory.clear_working()
+        self._save_history()
+
+    def clear_short_term_memory(self) -> None:
+        self.messages = self._initial_messages()
+        self.branches[self.active_branch].messages = self.messages
+        self._save_history()
+
+    def clear_long_term_memory(self) -> None:
+        self.memory.clear_long_term()
+        self._sync_long_term_memory()
+        self.profile_storage.save(self.memory.long_term)
+        self._save_history()
+
+    def set_memory_value(self, layer: str, key: str, value: str) -> None:
+        normalized_layer = normalize_memory_layer_name(layer)
+        if normalized_layer == "working":
+            self.memory.working[key] = value
+            self._save_history()
+            return
+
+        self.memory.long_term[key] = value
+        self._sync_long_term_memory()
+        self.profile_storage.save(self.memory.long_term)
+        self._save_history()
+
+    def delete_memory_value(self, layer: str, key: str) -> None:
+        normalized_layer = normalize_memory_layer_name(layer)
+        if normalized_layer == "working":
+            self.memory.working.pop(key, None)
+            self._save_history()
+            return
+
+        self.memory.long_term.pop(key, None)
+        self._sync_long_term_memory()
+        self.profile_storage.save(self.memory.long_term)
+        self._save_history()
 
     @staticmethod
     def _last_message_content(messages: list[dict[str, str]], role: str) -> str:
@@ -511,7 +608,7 @@ class CodeAgent:
         return ""
 
     @staticmethod
-    def _facts_diff(
+    def _memory_diff(
         left: dict[str, str],
         right: dict[str, str],
     ) -> dict[str, dict[str, str]]:
@@ -525,6 +622,18 @@ class CodeAgent:
                     "right": right_value,
                 }
         return diff
+
+    def _memory_tokens(self, memory: MemoryState) -> int:
+        if not memory.working and not memory.long_term:
+            return 0
+        memory_only_messages = build_request_messages(
+            self._message("system", ""),
+            memory,
+            [],
+            self._message("user", ""),
+            "",
+        )[1:-1]
+        return self.token_counter.count_messages(memory_only_messages)
 
     @staticmethod
     def _message(role: str, content: str) -> dict[str, str]:

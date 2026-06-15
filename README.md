@@ -58,6 +58,7 @@ code-agent
 /status
 /tokens
 /tokens проверь этот запрос без отправки
+/memory
 /reset
 /exit
 /quit
@@ -70,6 +71,12 @@ code-agent
 ```
 
 При следующем запуске `code-agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` очищает и текущую, и сохраненную историю.
+
+Долговременная память профиля хранится отдельно:
+
+```text
+~/.code-agent-cli/profile.md
+```
 
 Одноразовый запрос:
 
@@ -125,8 +132,17 @@ CLI считает токены локально перед запросом и 
 /tokens текст запроса
 /context
 /context strategy sliding
-/context strategy facts
+/context strategy memory
 /context strategy branching
+/memory
+/memory short
+/memory working
+/memory long
+/memory set working current_task реализовать memory layers
+/memory set long preferences сначала объяснять архитектуру
+/memory delete working current_task
+/memory clear short
+/memory clear working
 /branch list
 /branch compare variant-a variant-b
 /branch checkpoint base
@@ -156,32 +172,70 @@ export CODE_AGENT_CONTEXT_STRATEGY="sliding"
 
 Плюсы: дешево и предсказуемо. Минус: старые детали забываются.
 
-### Sticky Facts / Key-Value Memory
+### Memory Layers
 
-После каждого сообщения пользователя агент обновляет отдельный JSON-блок `facts`
-с важными устойчивыми данными: цель, ограничения, предпочтения, решения,
-текущая задача, файлы и риски.
+Агент использует явную модель памяти. Память разделена на слои:
+
+- `short-term` — последние сообщения текущего диалога;
+- `working` — данные текущей задачи: цель, план, файлы, временные ограничения и риски;
+- `long-term` — профиль, предпочтения, устойчивые решения проекта и знания.
+
+`short-term` и `working` сохраняются в `history.json`, а `long-term`
+сохраняется отдельно в Markdown-файле `profile.md`. Такой профиль можно
+просматривать и редактировать вручную. Если в старой истории встречается
+`memory.long_term`, агент не переносит его в профиль и удаляет из JSON при
+следующем сохранении истории.
+
+По умолчанию агент сам не решает, что сохранять в `working` или `long-term`.
+Пользователь явно выбирает слой командой:
+
+```text
+/memory set working current_task реализовать memory layers
+/memory set working files agent.py, context.py, storage.py
+/memory set long preferences сначала объяснять архитектуру, потом писать код
+/memory set long project_decisions CodeAgentCLI запускается через code-agent
+```
+
+Удаление также явное:
+
+```text
+/memory delete working files
+/memory delete long preferences
+```
 
 В запрос отправляется:
 
 ```text
 system prompt
-facts
+long-term memory
+working memory
 последние N сообщений как есть
 текущий запрос
 ```
 
 ```bash
-export CODE_AGENT_CONTEXT_STRATEGY="facts"
+export CODE_AGENT_CONTEXT_STRATEGY="memory"
 ```
 
-Плюсы: лучше держит важные детали при длинном диалоге. Минус: нужен дополнительный
-LLM-вызов для обновления facts.
+Плюсы: лучше держит важные детали при длинном диалоге и явно показывает, что
+сохраняется в рабочую или долговременную память.
+
+Команда `/memory` показывает все слои памяти. `/memory clear short` очищает
+текущий диалог, `/memory clear working` очищает рабочую память текущей задачи,
+не удаляя долговременные предпочтения и решения.
+Команда `/memory clear long` очищает `profile.md`.
+
+Если нужен экспериментальный автоматический memory router через LLM, его можно
+включить отдельно:
+
+```bash
+export CODE_AGENT_AUTO_MEMORY="1"
+```
 
 ### Branching
 
 Позволяет сохранять checkpoint, создавать ветки от него и продолжать диалог в
-каждой ветке независимо. Ветка хранит собственные сообщения и facts.
+каждой ветке независимо. Ветка хранит собственные сообщения и memory layers.
 
 ```bash
 export CODE_AGENT_CONTEXT_STRATEGY="branching"
@@ -202,14 +256,14 @@ export CODE_AGENT_CONTEXT_STRATEGY="branching"
 
 ```bash
 CODE_AGENT_CONTEXT_STRATEGY=sliding code-agent
-CODE_AGENT_CONTEXT_STRATEGY=facts code-agent
+CODE_AGENT_CONTEXT_STRATEGY=memory code-agent
 CODE_AGENT_CONTEXT_STRATEGY=branching code-agent
 ```
 
-`/context` показывает текущую стратегию, активную ветку, facts и токены prompt
+`/context` показывает текущую стратегию, активную ветку, memory layers и токены prompt
 для текущей стратегии по сравнению со sliding window. `/branch compare A B`
 показывает разницу между ветками: последний user prompt, смысл ветки, prompt
-tokens и отличающиеся facts.
+tokens и отличающиеся memory layers.
 
 ## Shortcut
 
@@ -233,9 +287,11 @@ source ~/.zshrc
 export CODE_AGENT_MODEL="deepseek-v4-flash"
 export CODE_AGENT_TEMPERATURE="0.2"
 export CODE_AGENT_MAX_HISTORY="20"
-export CODE_AGENT_CONTEXT_STRATEGY="facts"
-export CODE_AGENT_FACTS_MAX_TOKENS="1200"
+export CODE_AGENT_CONTEXT_STRATEGY="memory"
+export CODE_AGENT_MEMORY_MAX_TOKENS="1200"
+export CODE_AGENT_AUTO_MEMORY="0"
 export CODE_AGENT_CONTEXT_LIMIT="64000"
+export CODE_AGENT_PROFILE_FILE="~/.code-agent-cli/profile.md"
 export CODE_AGENT_INPUT_PRICE_PER_1M="0.28"
 export CODE_AGENT_OUTPUT_PRICE_PER_1M="0.42"
 export CODE_AGENT_MAX_FILE_BYTES="122880"
@@ -250,7 +306,7 @@ export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 
 `/status` также показывает токены текущей сессии: total, prompt, answer.
 Там же отображается путь к файлу истории, была ли история загружена при старте,
-текущая стратегия контекста, активная ветка, facts и остаток контекста модели.
+текущая стратегия контекста, активная ветка, memory layers и остаток контекста модели.
 
 ## Разработка
 

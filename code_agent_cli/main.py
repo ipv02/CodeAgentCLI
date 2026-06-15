@@ -174,7 +174,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
-    print(colorize("Команды: /help, /status, /tokens, /context, /branch, /reset, /exit", MUTED))
+    print(colorize("Команды: /help, /status, /tokens, /context, /memory, /branch, /reset, /exit", MUTED))
     print(colorize(session_summary(agent), MUTED))
 
     while True:
@@ -215,6 +215,10 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command == "/context":
             handle_context_command(agent, argument)
+            continue
+
+        if command == "/memory":
+            handle_memory_command(agent, argument)
             continue
 
         if command == "/branch":
@@ -339,8 +343,16 @@ def print_help() -> None:
             ("/status", "показать настройки текущей сессии"),
             ("/tokens", "показать токены истории и последнего запроса"),
             ("/tokens текст", "посчитать токены текста без отправки в API"),
-            ("/context", "показать стратегию контекста и facts"),
-            ("/context strategy NAME", "переключить: sliding, facts, branching"),
+            ("/context", "показать стратегию контекста и memory layers"),
+            ("/context strategy NAME", "переключить: sliding, memory, branching"),
+            ("/memory", "показать short-term, working и long-term память"),
+            ("/memory short|working|long", "показать отдельный слой памяти"),
+            ("/memory set working KEY VALUE", "явно сохранить VALUE в рабочую память"),
+            ("/memory set long KEY VALUE", "явно сохранить VALUE в профиль profile.md"),
+            ("/memory delete working|long KEY", "удалить ключ из выбранного слоя"),
+            ("/memory clear short", "очистить краткосрочную память диалога"),
+            ("/memory clear working", "очистить рабочую память текущей задачи"),
+            ("/memory clear long", "очистить долговременную память"),
             ("/branch list", "показать ветки"),
             ("/branch compare A B", "сравнить две ветки"),
             ("/branch checkpoint NAME", "сохранить checkpoint активной ветки"),
@@ -414,9 +426,11 @@ def print_status(agent: CodeAgent) -> None:
         status_line("Режим", str(status["context_strategy"])),
         status_line("Активная ветка", str(status["active_branch"])),
         status_line("Веток", str(status["branch_count"])),
-        status_line("Facts", f"{status['facts_count']} ключей"),
-        status_line("Facts tokens", str(status["facts_tokens"])),
-        status_line("Facts max", f"{status['facts_max_tokens']} токенов"),
+        status_line("Working memory", f"{status['working_memory_count']} ключей"),
+        status_line("Long-term memory", f"{status['long_term_memory_count']} ключей"),
+        status_line("Memory tokens", str(status["memory_tokens"])),
+        status_line("Memory max", f"{status['memory_max_tokens']} токенов"),
+        status_line("Auto memory", "on" if status["auto_memory_updates"] else "off"),
     ):
         print(line)
 
@@ -428,6 +442,7 @@ def print_status(agent: CodeAgent) -> None:
     for line in (
         status_line("Сообщения", f"{history} сообщений"),
         status_line("Файл истории", str(status["history_file"])),
+        status_line("Файл профиля", str(status["profile_file"])),
         status_line("Состояние истории", history_loaded),
     ):
         print(line)
@@ -475,7 +490,7 @@ def print_current_token_state(agent: CodeAgent, request_text: str | None = None)
         status_line("Остаток", str(status["remaining_context_tokens"])),
         status_line("Стратегия", str(status["context_strategy"])),
         status_line("Активная ветка", str(status["active_branch"])),
-        status_line("Facts tokens", str(status["facts_tokens"])),
+        status_line("Memory tokens", str(status["memory_tokens"])),
         status_line("Сессия total", str(status["session_total_tokens"]), VALUE),
         status_line("Сессия prompt", str(status["session_prompt_tokens"])),
         status_line("Сессия answer", str(status["session_completion_tokens"])),
@@ -509,8 +524,8 @@ def print_last_token_report(agent: CodeAgent) -> None:
     print(status_line("Текущий запрос", f"{breakdown.current_request_tokens} (локальная оценка)"))
     print(status_line("Вся история диалога", f"{full_history_tokens} (локальная оценка)"))
     report = agent.context_report()
-    if report["facts"]:
-        print(status_line("Facts", f"{report['facts_tokens']} токенов"))
+    if report["memory_tokens"]:
+        print(status_line("Memory layers", f"{report['memory_tokens']} токенов"))
     if actual_total:
         print(status_line("Ответ модели", f"{actual_answer} (API)", SUCCESS))
         print()
@@ -582,7 +597,7 @@ def handle_context_command(agent: CodeAgent, argument: str) -> None:
         print(status_line("Стратегия", agent.context_strategy, SUCCESS))
         return
 
-    print("Использование: /context или /context strategy sliding|facts|branching")
+    print("Использование: /context или /context strategy sliding|memory|branching")
 
 
 def print_context_report(agent: CodeAgent) -> None:
@@ -594,19 +609,114 @@ def print_context_report(agent: CodeAgent) -> None:
         status_line("Сообщения", f"{report['messages']} / {report['max_messages']}"),
         status_line("Prompt tokens", str(report["prompt_tokens_current_strategy"])),
         status_line("Sliding tokens", str(report["prompt_tokens_sliding"])),
-        status_line("Facts tokens", str(report["facts_tokens"])),
+        status_line("Memory tokens", str(report["memory_tokens"])),
     ):
         print(line)
 
     if report["last_memory_error"]:
         print(status_line("Ошибка memory", str(report["last_memory_error"]), WARNING))
 
-    facts = report["facts"]
-    if facts:
+    print()
+    print_memory_layers(agent, include_short=False)
+
+
+def handle_memory_command(agent: CodeAgent, argument: str) -> None:
+    parts = argument.split()
+    if not parts:
+        print_memory_layers(agent)
+        return
+
+    layer = parts[0].lower()
+    if layer in {"short", "short-term", "short_term"} and len(parts) == 1:
+        print_short_term_memory(agent)
+        return
+
+    if layer in {"working", "work"} and len(parts) == 1:
+        print_memory_layer("Working memory", agent.memory.working)
+        return
+
+    if layer in {"long", "long-term", "long_term"} and len(parts) == 1:
+        print_memory_layer("Long-term memory", agent.memory.long_term)
+        return
+
+    if len(parts) == 2 and parts[0].lower() == "clear":
+        target = parts[1].lower()
+        if target in {"short", "short-term", "short_term"}:
+            agent.clear_short_term_memory()
+            print(status_line("Short-term memory", "очищена", WARNING))
+            return
+        if target in {"working", "work"}:
+            agent.clear_working_memory()
+            print(status_line("Working memory", "очищена", WARNING))
+            return
+        if target in {"long", "long-term", "long_term"}:
+            agent.clear_long_term_memory()
+            print(status_line("Long-term memory", "очищена", WARNING))
+            return
+
+    if len(parts) >= 4 and parts[0].lower() == "set":
+        layer = parts[1]
+        key = parts[2]
+        value = " ".join(parts[3:]).strip()
+        try:
+            agent.set_memory_value(layer, key, value)
+        except CodeAgentError as error:
+            print(f"Ошибка: {error}", file=sys.stderr)
+            return
+        print(status_line(f"{layer}.{key}", value, SUCCESS))
+        return
+
+    if len(parts) == 3 and parts[0].lower() in {"delete", "del", "remove", "rm"}:
+        layer = parts[1]
+        key = parts[2]
+        try:
+            agent.delete_memory_value(layer, key)
+        except CodeAgentError as error:
+            print(f"Ошибка: {error}", file=sys.stderr)
+            return
+        print(status_line(f"{layer}.{key}", "удалено", WARNING))
+        return
+
+    print(
+        "Использование: /memory | /memory short|working|long | "
+        "/memory set working|long KEY VALUE | /memory delete working|long KEY | "
+        "/memory clear short|working|long"
+    )
+
+
+def print_memory_layers(agent: CodeAgent, include_short: bool = True) -> None:
+    if include_short:
+        print_short_term_memory(agent)
         print()
-        print(header_line("Facts"))
-        for key in sorted(facts):
-            print(status_line(key, facts[key]))
+    print_memory_layer("Working memory", agent.memory.working)
+    print()
+    print_memory_layer("Long-term memory", agent.memory.long_term)
+
+
+def print_short_term_memory(agent: CodeAgent) -> None:
+    visible_messages = [
+        message
+        for message in agent.messages
+        if message.get("role") in {"user", "assistant"}
+    ]
+    print(header_line("Short-term memory"))
+    print(status_line("Сообщения", f"{len(visible_messages)} / {agent.max_history_messages}"))
+    if not visible_messages:
+        print(status_line("Состояние", "пусто", WARNING))
+        return
+    for message in visible_messages[-min(len(visible_messages), 6):]:
+        role = message.get("role", "")
+        content = shorten_text(message.get("content", ""), 96)
+        print(status_line(role, content, MUTED))
+
+
+def print_memory_layer(title: str, layer: dict[str, str]) -> None:
+    print(header_line(title))
+    if not layer:
+        print(status_line("Состояние", "пусто", WARNING))
+        return
+    for key in sorted(layer):
+        print(status_line(key, layer[key]))
 
 
 def handle_branch_command(agent: CodeAgent, argument: str) -> None:
@@ -653,7 +763,8 @@ def print_branch_report(agent: CodeAgent) -> None:
         marker = "*" if name == report["active_branch"] else " "
         value = (
             f"{branch['messages']} сообщений, "
-            f"{branch['facts']} facts, "
+            f"{len(branch['working_memory'])} working, "
+            f"{len(branch['long_term_memory'])} long-term, "
             f"{branch['prompt_tokens']} prompt tokens, "
             f"{len(branch['checkpoints'])} checkpoints"
         )
@@ -689,16 +800,16 @@ def print_branch_compare(agent: CodeAgent, left_name: str, right_name: str) -> N
         print(status_line(str(report["left_name"]), shorten_text(left["current_task"] or left["goal"], 120)))
         print(status_line(str(report["right_name"]), shorten_text(right["current_task"] or right["goal"], 120)))
 
-    facts_diff = report["facts_diff"]
-    if facts_diff:
+    memory_diff = report["memory_diff"]
+    if memory_diff:
         print()
-        print(header_line("Разные facts"))
-        for key, diff in facts_diff.items():
+        print(header_line("Разная память"))
+        for key, diff in memory_diff.items():
             print(status_line(f"{key} / {report['left_name']}", shorten_text(diff["left"], 110), MUTED))
             print(status_line(f"{key} / {report['right_name']}", shorten_text(diff["right"], 110), MUTED))
     else:
         print()
-        print(status_line("Facts", "одинаковые", WARNING))
+        print(status_line("Memory", "одинаковая", WARNING))
 
 
 def format_usd(value: float) -> str:
