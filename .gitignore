@@ -3,7 +3,14 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 build/
+dist/
+pip-wheel-metadata/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.idea/
+.vscode/
 .DS_Store
