@@ -174,7 +174,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
-    print(colorize("Команды: /help, /status, /tokens, /context, /memory, /branch, /reset, /exit", MUTED))
+    print(colorize("Команды: /help, /status, /tokens, /context, /memory, /profile, /branch, /reset, /exit", MUTED))
     print(colorize(session_summary(agent), MUTED))
 
     while True:
@@ -193,8 +193,12 @@ def run_interactive_session(agent: CodeAgent) -> None:
             return
 
         if text == "/reset":
-            agent.reset_history()
-            print("История очищена.")
+            try:
+                agent.reset_agent()
+            except OSError as error:
+                print(f"Ошибка: {error}", file=sys.stderr)
+                continue
+            print("Агент полностью очищен.")
             continue
 
         if text == "/help":
@@ -219,6 +223,10 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command == "/memory":
             handle_memory_command(agent, argument)
+            continue
+
+        if command == "/profile":
+            handle_profile_command(agent, argument)
             continue
 
         if command == "/branch":
@@ -337,14 +345,29 @@ def print_help() -> None:
         ('export DEEPSEEK_API_KEY="ваш_ключ"',),
     )
     print()
-    print_command_help(
+    print_command_help_section(
+        "Базовые команды",
         (
             ("/help", "показать помощь"),
             ("/status", "показать настройки текущей сессии"),
+            ("/reset", "полностью очистить агента: историю, память, профиль и ветки"),
+            ("/exit", "выйти"),
+        )
+    )
+    print()
+    print_command_help_section(
+        "Контекст и токены",
+        (
             ("/tokens", "показать токены истории и последнего запроса"),
             ("/tokens текст", "посчитать токены текста без отправки в API"),
             ("/context", "показать стратегию контекста и memory layers"),
             ("/context strategy NAME", "переключить: sliding, memory, branching"),
+        )
+    )
+    print()
+    print_command_help_section(
+        "Память",
+        (
             ("/memory", "показать short-term, working и long-term память"),
             ("/memory short|working|long", "показать отдельный слой памяти"),
             ("/memory set working KEY VALUE", "явно сохранить VALUE в рабочую память"),
@@ -353,13 +376,28 @@ def print_help() -> None:
             ("/memory clear short", "очистить краткосрочную память диалога"),
             ("/memory clear working", "очистить рабочую память текущей задачи"),
             ("/memory clear long", "очистить долговременную память"),
+            ("/memory clear all", "очистить всю память: short-term, working и long-term"),
+        )
+    )
+    print()
+    print_command_help_section(
+        "Профиль",
+        (
+            ("/profile", "показать профиль пользователя из profile.md"),
+            ("/profile set KEY VALUE", "явно сохранить VALUE в профиль"),
+            ("/profile delete KEY", "удалить ключ из профиля"),
+            ("/profile clear", "очистить profile.md"),
+        )
+    )
+    print()
+    print_command_help_section(
+        "Ветки",
+        (
             ("/branch list", "показать ветки"),
             ("/branch compare A B", "сравнить две ветки"),
             ("/branch checkpoint NAME", "сохранить checkpoint активной ветки"),
             ("/branch create NAME [CHECKPOINT]", "создать ветку"),
             ("/branch switch NAME", "переключиться на ветку"),
-            ("/reset", "очистить сохраненную историю"),
-            ("/exit", "выйти"),
         )
     )
 
@@ -370,8 +408,8 @@ def print_section(title: str, lines: tuple[str, ...]) -> None:
         print(command_line(line))
 
 
-def print_command_help(commands: tuple[tuple[str, str], ...]) -> None:
-    print(header_line("Интерактивные команды"))
+def print_command_help_section(title: str, commands: tuple[tuple[str, str], ...]) -> None:
+    print(header_line(title))
     width = max(len(command) for command, _ in commands)
     for command, description in commands:
         if not use_color():
@@ -642,16 +680,36 @@ def handle_memory_command(agent: CodeAgent, argument: str) -> None:
     if len(parts) == 2 and parts[0].lower() == "clear":
         target = parts[1].lower()
         if target in {"short", "short-term", "short_term"}:
-            agent.clear_short_term_memory()
+            try:
+                agent.clear_short_term_memory()
+            except OSError as error:
+                print(f"Ошибка: {error}", file=sys.stderr)
+                return
             print(status_line("Short-term memory", "очищена", WARNING))
             return
         if target in {"working", "work"}:
-            agent.clear_working_memory()
+            try:
+                agent.clear_working_memory()
+            except OSError as error:
+                print(f"Ошибка: {error}", file=sys.stderr)
+                return
             print(status_line("Working memory", "очищена", WARNING))
             return
         if target in {"long", "long-term", "long_term"}:
-            agent.clear_long_term_memory()
+            try:
+                agent.clear_long_term_memory()
+            except OSError as error:
+                print(f"Ошибка: {error}", file=sys.stderr)
+                return
             print(status_line("Long-term memory", "очищена", WARNING))
+            return
+        if target == "all":
+            try:
+                agent.clear_all_memory()
+            except OSError as error:
+                print(f"Ошибка: {error}", file=sys.stderr)
+                return
+            print(status_line("Memory", "полностью очищена", WARNING))
             return
 
     if len(parts) >= 4 and parts[0].lower() == "set":
@@ -660,7 +718,7 @@ def handle_memory_command(agent: CodeAgent, argument: str) -> None:
         value = " ".join(parts[3:]).strip()
         try:
             agent.set_memory_value(layer, key, value)
-        except CodeAgentError as error:
+        except (CodeAgentError, OSError) as error:
             print(f"Ошибка: {error}", file=sys.stderr)
             return
         print(status_line(f"{layer}.{key}", value, SUCCESS))
@@ -671,7 +729,7 @@ def handle_memory_command(agent: CodeAgent, argument: str) -> None:
         key = parts[2]
         try:
             agent.delete_memory_value(layer, key)
-        except CodeAgentError as error:
+        except (CodeAgentError, OSError) as error:
             print(f"Ошибка: {error}", file=sys.stderr)
             return
         print(status_line(f"{layer}.{key}", "удалено", WARNING))
@@ -680,7 +738,7 @@ def handle_memory_command(agent: CodeAgent, argument: str) -> None:
     print(
         "Использование: /memory | /memory short|working|long | "
         "/memory set working|long KEY VALUE | /memory delete working|long KEY | "
-        "/memory clear short|working|long"
+        "/memory clear short|working|long|all"
     )
 
 
@@ -717,6 +775,60 @@ def print_memory_layer(title: str, layer: dict[str, str]) -> None:
         return
     for key in sorted(layer):
         print(status_line(key, layer[key]))
+
+
+def handle_profile_command(agent: CodeAgent, argument: str) -> None:
+    parts = argument.split()
+    if not parts:
+        print_profile(agent)
+        return
+
+    action = parts[0].lower()
+    if action == "path" and len(parts) == 1:
+        print(status_line("Файл профиля", str(agent.profile_storage.path), VALUE))
+        return
+
+    if action == "clear" and len(parts) == 1:
+        try:
+            agent.clear_long_term_memory()
+        except OSError as error:
+            print(f"Ошибка: {error}", file=sys.stderr)
+            return
+        print(status_line("Профиль", "очищен", WARNING))
+        return
+
+    if action == "set" and len(parts) >= 3:
+        key = parts[1]
+        value = " ".join(parts[2:]).strip()
+        try:
+            agent.set_memory_value("long", key, value)
+        except OSError as error:
+            print(f"Ошибка: {error}", file=sys.stderr)
+            return
+        print(status_line(f"profile.{key}", value, SUCCESS))
+        return
+
+    if action in {"delete", "del", "remove", "rm"} and len(parts) == 2:
+        key = parts[1]
+        try:
+            agent.delete_memory_value("long", key)
+        except OSError as error:
+            print(f"Ошибка: {error}", file=sys.stderr)
+            return
+        print(status_line(f"profile.{key}", "удалено", WARNING))
+        return
+
+    print(
+        "Использование: /profile | /profile path | /profile set KEY VALUE | "
+        "/profile delete KEY | /profile clear"
+    )
+
+
+def print_profile(agent: CodeAgent) -> None:
+    print(header_line("Профиль"))
+    print(status_line("Файл", str(agent.profile_storage.path), VALUE))
+    print()
+    print_memory_layer("Long-term memory", agent.memory.long_term)
 
 
 def handle_branch_command(agent: CodeAgent, argument: str) -> None:

@@ -271,6 +271,13 @@ class CodeAgent:
         self.history_loaded = False
         self._save_history()
 
+    def reset_agent(self) -> None:
+        self.profile_storage.save({})
+        self.token_usage = TokenUsage()
+        self.last_token_breakdown = None
+        self.last_actual_usage = {}
+        self.reset_history()
+
     @property
     def memory(self) -> MemoryState:
         return self.branches[self.active_branch].memory
@@ -575,6 +582,11 @@ class CodeAgent:
         self._sync_long_term_memory()
         self.profile_storage.save(self.memory.long_term)
         self._save_history()
+
+    def clear_all_memory(self) -> None:
+        self.clear_short_term_memory()
+        self.clear_working_memory()
+        self.clear_long_term_memory()
 
     def set_memory_value(self, layer: str, key: str, value: str) -> None:
         normalized_layer = normalize_memory_layer_name(layer)

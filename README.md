@@ -59,6 +59,7 @@ code-agent
 /tokens
 /tokens проверь этот запрос без отправки
 /memory
+/profile
 /reset
 /exit
 /quit
@@ -70,7 +71,7 @@ code-agent
 ~/.code-agent-cli/history.json
 ```
 
-При следующем запуске `code-agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` очищает и текущую, и сохраненную историю.
+При следующем запуске `code-agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` полностью очищает агента: историю, память, профиль и ветки.
 
 Долговременная память профиля хранится отдельно:
 
@@ -143,6 +144,10 @@ CLI считает токены локально перед запросом и 
 /memory delete working current_task
 /memory clear short
 /memory clear working
+/memory clear all
+/profile
+/profile set preferences сначала объяснять архитектуру
+/profile delete preferences
 /branch list
 /branch compare variant-a variant-b
 /branch checkpoint base
@@ -224,6 +229,28 @@ export CODE_AGENT_CONTEXT_STRATEGY="memory"
 текущий диалог, `/memory clear working` очищает рабочую память текущей задачи,
 не удаляя долговременные предпочтения и решения.
 Команда `/memory clear long` очищает `profile.md`.
+Команда `/memory clear all` очищает всю память: short-term, working и long-term.
+
+`/profile` — удобный интерфейс для персонализации поверх `long-term` памяти:
+
+```text
+/profile
+/profile path
+/profile set profile Пользователь разрабатывает iOS-приложения.
+/profile set preferences Отвечать на русском, сначала кратко объяснять архитектуру.
+/profile set constraints Не использовать UIKit без необходимости.
+/profile delete constraints
+/profile clear
+```
+
+Профиль автоматически подключается к каждому запросу в стратегии `memory`.
+
+Проверить разные профили можно разными файлами:
+
+```bash
+CODE_AGENT_PROFILE_FILE=/tmp/profile-ios.md code-agent
+CODE_AGENT_PROFILE_FILE=/tmp/profile-backend.md code-agent
+```
 
 Если нужен экспериментальный автоматический memory router через LLM, его можно
 включить отдельно:
