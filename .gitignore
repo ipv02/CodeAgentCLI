@@ -13,4 +13,13 @@ pip-wheel-metadata/
 htmlcov/
 .idea/
 .vscode/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
 .DS_Store
