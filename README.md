@@ -48,7 +48,7 @@ source ~/.zshrc
 
 ```bash
 source .venv/bin/activate
-code-agent
+agent
 ```
 
 Команды внутри чата:
@@ -58,6 +58,7 @@ code-agent
 /status
 /tokens
 /tokens проверь этот запрос без отправки
+/task
 /memory
 /profile
 /reset
@@ -71,7 +72,7 @@ code-agent
 ~/.code-agent-cli/history.json
 ```
 
-При следующем запуске `code-agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` полностью очищает агента: историю, память, профиль и ветки.
+При следующем запуске `agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` полностью очищает агента: историю, память, профиль и ветки.
 
 Долговременная память профиля хранится отдельно:
 
@@ -82,7 +83,7 @@ code-agent
 Одноразовый запрос:
 
 ```bash
-code-agent "объясни, чем struct отличается от class в Swift"
+agent "объясни, чем struct отличается от class в Swift"
 ```
 
 ## Работа с файлами
@@ -90,25 +91,25 @@ code-agent "объясни, чем struct отличается от class в Swi
 Весь файл:
 
 ```bash
-code-agent --file Sources/App.swift "найди ошибки"
+agent --file Sources/App.swift "найди ошибки"
 ```
 
 Диапазон строк:
 
 ```bash
-code-agent --file Sources/App.swift --range 40:120 "проверь участок"
+agent --file Sources/App.swift --range 40:120 "проверь участок"
 ```
 
 Большой файл без подтверждения:
 
 ```bash
-code-agent --file big_file.py --force-file "проверь файл"
+agent --file big_file.py --force-file "проверь файл"
 ```
 
 Другой лимит размера файла:
 
 ```bash
-code-agent --file big_file.py --max-file-bytes 200000 "проверь файл"
+agent --file big_file.py --max-file-bytes 200000 "проверь файл"
 ```
 
 Содержимое приложенного файла не сохраняется целиком в историю диалога.
@@ -135,6 +136,12 @@ CLI считает токены локально перед запросом и 
 /context strategy sliding
 /context strategy memory
 /context strategy branching
+/task
+/task set stage execution
+/task set step добавить state machine
+/task set expected проверить compileall
+/task pause
+/task resume
 /memory
 /memory short
 /memory working
@@ -231,6 +238,39 @@ export CODE_AGENT_CONTEXT_STRATEGY="memory"
 Команда `/memory clear long` очищает `profile.md`.
 Команда `/memory clear all` очищает всю память: short-term, working и long-term.
 
+### Task State Machine
+
+Агент хранит формализованное состояние текущей задачи как конечный автомат:
+
+- `stage` — этап задачи: `planning`, `execution`, `validation`, `done`, `paused`;
+- `current_step` — что делаем прямо сейчас;
+- `expected_action` — что ожидается дальше;
+- `summary` — краткая суть задачи.
+
+Task state сохраняется в `history.json` вместе с рабочей памятью и автоматически
+подключается к каждому запросу в стратегии `memory`.
+
+По умолчанию агент сам обновляет `task_state` внутри рабочего цикла.
+Команды `/task ...` остаются как просмотр и ручной override.
+
+Команды:
+
+```text
+/task
+/task set stage planning
+/task set stage execution
+/task set step реализовать state machine
+/task set expected проверить compileall и smoke сценарий
+/task set summary задача про формализованное состояние агента
+/task pause
+/task resume
+/task clear
+```
+
+Пауза работает на любом этапе через `/task pause`. После `/task resume` агент
+возвращается на предыдущий рабочий этап и продолжает без повторного объяснения,
+потому что `stage`, `current_step` и `expected_action` уже лежат в prompt.
+
 `/profile` — удобный интерфейс для персонализации поверх `long-term` памяти:
 
 ```text
@@ -248,8 +288,8 @@ export CODE_AGENT_CONTEXT_STRATEGY="memory"
 Проверить разные профили можно разными файлами:
 
 ```bash
-CODE_AGENT_PROFILE_FILE=/tmp/profile-ios.md code-agent
-CODE_AGENT_PROFILE_FILE=/tmp/profile-backend.md code-agent
+CODE_AGENT_PROFILE_FILE=/tmp/profile-ios.md agent
+CODE_AGENT_PROFILE_FILE=/tmp/profile-backend.md agent
 ```
 
 Если нужен экспериментальный автоматический memory router через LLM, его можно
@@ -282,9 +322,9 @@ export CODE_AGENT_CONTEXT_STRATEGY="branching"
 Сравнить режимы можно так:
 
 ```bash
-CODE_AGENT_CONTEXT_STRATEGY=sliding code-agent
-CODE_AGENT_CONTEXT_STRATEGY=memory code-agent
-CODE_AGENT_CONTEXT_STRATEGY=branching code-agent
+CODE_AGENT_CONTEXT_STRATEGY=sliding agent
+CODE_AGENT_CONTEXT_STRATEGY=memory agent
+CODE_AGENT_CONTEXT_STRATEGY=branching agent
 ```
 
 `/context` показывает текущую стратегию, активную ветку, memory layers и токены prompt
@@ -294,11 +334,11 @@ tokens и отличающиеся memory layers.
 
 ## Shortcut
 
-Чтобы запускать `code-agent` без ручной активации `.venv`, добавьте в `~/.zshrc`:
+Чтобы запускать `agent` без ручной активации `.venv`, добавьте в `~/.zshrc`:
 
 ```bash
-code-agent() {
-  /path/to/CodeAgentCLI/.venv/bin/code-agent "$@"
+agent() {
+  /path/to/CodeAgentCLI/.venv/bin/agent "$@"
 }
 ```
 
@@ -342,7 +382,7 @@ python -m pip install -e .
 python -m compileall code_agent_cli
 ```
 
-Если `code-agent` запускается из уже установленного пакета и не видит новые команды,
+Если `agent` запускается из уже установленного пакета и не видит новые команды,
 переустановите локальную версию:
 
 ```bash

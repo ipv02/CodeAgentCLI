@@ -24,10 +24,64 @@ LONG_TERM_MEMORY_KEYS = {
     "knowledge",
     "decisions",
 }
+TASK_STAGES = {
+    "planning",
+    "execution",
+    "validation",
+    "done",
+    "paused",
+}
 
 MEMORY_ROUTER_SYSTEM_PROMPT = """
 Ты обновляешь явную layered memory для code assistant.
 Верни только JSON object. Не добавляй markdown.
+""".strip()
+
+TASK_STATE_SYSTEM_PROMPT = """
+Ты обновляешь формализованное состояние задачи для code assistant.
+Верни только JSON object. Не добавляй markdown.
+""".strip()
+
+TASK_STATE_UPDATE_PROMPT = """
+Обнови состояние задачи на основе последнего взаимодействия.
+
+Состояние должно быть конечным автоматом со stage:
+- planning
+- execution
+- validation
+- done
+- paused
+
+Поля:
+- stage: текущий этап
+- current_step: что делается прямо сейчас
+- expected_action: что ожидается следующим
+- summary: краткая формулировка задачи
+
+Правила:
+- paused используй только если пользователь явно поставил задачу на паузу.
+- done используй только если задача действительно завершена.
+- Если агент объясняет план или подход, обычно это planning.
+- Если агент пишет, меняет или предлагает реализовать код, обычно это execution.
+- Если агент проверяет, тестирует, валидирует или просит проверить результат, обычно это validation.
+- Не оставляй JSON пустым. Возвращай все 4 поля.
+
+Текущее состояние:
+{task_state}
+
+Последнее сообщение пользователя:
+{user_message}
+
+Последний ответ ассистента:
+{assistant_message}
+
+Верни JSON строго в формате:
+{{
+  "stage": "planning",
+  "current_step": "...",
+  "expected_action": "...",
+  "summary": "..."
+}}
 """.strip()
 
 MEMORY_ROUTER_PROMPT = """
@@ -64,16 +118,19 @@ MEMORY_ROUTER_PROMPT = """
 class MemoryState:
     working: dict[str, str] = field(default_factory=dict)
     long_term: dict[str, str] = field(default_factory=dict)
+    task_state: "TaskState" = field(default_factory=lambda: TaskState())
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "working": self.working,
             "long_term": self.long_term,
+            "task_state": self.task_state.to_dict(),
         }
 
     def to_history_dict(self) -> dict[str, Any]:
         return {
             "working": self.working,
+            "task_state": self.task_state.to_dict(),
         }
 
     @classmethod
@@ -83,6 +140,7 @@ class MemoryState:
         return cls(
             working=normalize_memory_layer(value.get("working")),
             long_term=normalize_memory_layer(value.get("long_term")),
+            task_state=TaskState.from_dict(value.get("task_state")),
         )
 
     @classmethod
@@ -96,7 +154,8 @@ class MemoryState:
                 long_term[key] = value
             else:
                 working[key] = value
-        return cls(working=working, long_term=long_term)
+        task_state = TaskState.from_legacy_working(working)
+        return cls(working=working, long_term=long_term, task_state=task_state)
 
     def apply_update(self, update: "MemoryUpdate") -> None:
         merge_layer(self.working, update.working)
@@ -104,6 +163,7 @@ class MemoryState:
 
     def clear_working(self) -> None:
         self.working.clear()
+        self.task_state.clear()
 
     def clear_long_term(self) -> None:
         self.long_term.clear()
@@ -122,6 +182,107 @@ class MemoryUpdate:
     discard: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class TaskStateUpdate:
+    stage: str
+    current_step: str
+    expected_action: str
+    summary: str
+
+
+@dataclass
+class TaskState:
+    stage: str = "planning"
+    current_step: str = ""
+    expected_action: str = ""
+    summary: str = ""
+    previous_stage: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        payload = {
+            "stage": self.stage,
+            "current_step": self.current_step,
+            "expected_action": self.expected_action,
+            "summary": self.summary,
+        }
+        if self.previous_stage:
+            payload["previous_stage"] = self.previous_stage
+        return payload
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "TaskState":
+        if not isinstance(value, dict):
+            return cls()
+        stage = normalize_task_stage(value.get("stage"))
+        previous_stage = normalize_task_stage(value.get("previous_stage"), allow_empty=True)
+        return cls(
+            stage=stage or "planning",
+            current_step=normalize_text_field(value.get("current_step")),
+            expected_action=normalize_text_field(value.get("expected_action")),
+            summary=normalize_text_field(value.get("summary")),
+            previous_stage=previous_stage,
+        )
+
+    @classmethod
+    def from_legacy_working(cls, working: dict[str, str]) -> "TaskState":
+        stage = normalize_task_stage(working.get("state")) or "planning"
+        current_step = working.get("current_task", "")
+        expected_action = working.get("plan", "")
+        summary = working.get("goal", "")
+        return cls(
+            stage=stage,
+            current_step=current_step,
+            expected_action=expected_action,
+            summary=summary,
+        )
+
+    def set_stage(self, stage: str) -> None:
+        normalized = normalize_task_stage(stage)
+        if not normalized:
+            raise ValueError("task stage must be planning, execution, validation, done, or paused")
+        self.stage = normalized
+        if normalized != "paused":
+            self.previous_stage = ""
+
+    def pause(self) -> None:
+        if self.stage == "paused":
+            return
+        self.previous_stage = self.stage
+        self.stage = "paused"
+
+    def resume(self) -> None:
+        if self.stage != "paused":
+            return
+        self.stage = self.previous_stage or "execution"
+        self.previous_stage = ""
+
+    def clear(self) -> None:
+        self.stage = "planning"
+        self.current_step = ""
+        self.expected_action = ""
+        self.summary = ""
+        self.previous_stage = ""
+
+    def merge_update(self, update: TaskStateUpdate) -> None:
+        self.stage = update.stage
+        if update.current_step:
+            self.current_step = update.current_step
+        if update.expected_action:
+            self.expected_action = update.expected_action
+        if update.summary:
+            self.summary = update.summary
+
+    @property
+    def is_empty(self) -> bool:
+        return (
+            self.stage == "planning"
+            and not self.current_step
+            and not self.expected_action
+            and not self.summary
+            and not self.previous_stage
+        )
+
+
 def normalize_memory_layer(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -137,6 +298,19 @@ def normalize_memory_layer(value: Any) -> dict[str, str]:
     }
 
 
+def normalize_text_field(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def normalize_task_stage(value: Any, allow_empty: bool = False) -> str:
+    normalized = normalize_text_field(value).lower()
+    if not normalized and allow_empty:
+        return ""
+    return normalized if normalized in TASK_STAGES else ""
+
+
 def merge_layer(target: dict[str, str], update: dict[str, str]) -> None:
     for key, value in update.items():
         normalized_value = value.strip()
@@ -149,9 +323,12 @@ def merge_layer(target: dict[str, str], update: dict[str, str]) -> None:
 def memory_messages(memory: MemoryState) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     long_term_message = memory_layer_message("Long-term memory", memory.long_term)
+    task_state_message = task_state_message_block(memory.task_state)
     working_message = memory_layer_message("Working memory", memory.working)
     if long_term_message is not None:
         messages.append(long_term_message)
+    if task_state_message is not None:
+        messages.append(task_state_message)
     if working_message is not None:
         messages.append(working_message)
     return messages
@@ -171,6 +348,67 @@ def memory_layer_message(title: str, layer: dict[str, str]) -> dict[str, str] | 
         "role": "system",
         "content": "\n".join(lines),
     }
+
+
+def task_state_message_block(task_state: TaskState) -> dict[str, str] | None:
+    if task_state.is_empty:
+        return None
+    lines = [
+        "Task state:",
+        f"- stage: {task_state.stage}",
+    ]
+    if task_state.current_step:
+        lines.append(f"- current_step: {task_state.current_step}")
+    if task_state.expected_action:
+        lines.append(f"- expected_action: {task_state.expected_action}")
+    if task_state.summary:
+        lines.append(f"- summary: {task_state.summary}")
+    if task_state.previous_stage:
+        lines.append(f"- previous_stage: {task_state.previous_stage}")
+    return {
+        "role": "system",
+        "content": "\n".join(lines),
+    }
+
+
+def build_task_state_update_messages(
+    current_state: TaskState,
+    user_text: str,
+    assistant_text: str,
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": TASK_STATE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": TASK_STATE_UPDATE_PROMPT.format(
+                task_state=json.dumps(current_state.to_dict(), ensure_ascii=False, indent=2),
+                user_message=user_text,
+                assistant_message=assistant_text,
+            ),
+        },
+    ]
+
+
+def parse_task_state_update_response(text: str) -> TaskStateUpdate:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+
+    payload = json.loads(stripped)
+    if not isinstance(payload, dict):
+        raise ValueError("task state update response is not a JSON object")
+
+    stage = normalize_task_stage(payload.get("stage"))
+    if not stage:
+        raise ValueError("task state update response has invalid stage")
+
+    return TaskStateUpdate(
+        stage=stage,
+        current_step=normalize_text_field(payload.get("current_step")),
+        expected_action=normalize_text_field(payload.get("expected_action")),
+        summary=normalize_text_field(payload.get("summary")),
+    )
 
 
 def build_memory_update_messages(

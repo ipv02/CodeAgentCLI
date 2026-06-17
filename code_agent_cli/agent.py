@@ -23,8 +23,11 @@ from code_agent_cli.memory import (
     MemoryState,
     ProfileStorage,
     build_memory_update_messages,
+    build_task_state_update_messages,
     default_profile_file,
+    normalize_task_stage,
     parse_memory_update_response,
+    parse_task_state_update_response,
 )
 from code_agent_cli.storage import HistoryStorage, default_history_file
 from code_agent_cli.tokens import ModelTokenConfig, TokenBreakdown, TokenCounter
@@ -146,6 +149,9 @@ class CodeAgent:
     auto_memory_updates: bool = field(
         default_factory=lambda: env_bool("CODE_AGENT_AUTO_MEMORY", False)
     )
+    auto_task_state_updates: bool = field(
+        default_factory=lambda: env_bool("CODE_AGENT_AUTO_TASK_STATE", True)
+    )
     context_limit: int = field(
         default_factory=lambda: env_int("CODE_AGENT_CONTEXT_LIMIT", 64_000)
     )
@@ -201,6 +207,7 @@ class CodeAgent:
             )
 
         self._update_memory_if_needed(text)
+        self._update_task_state_before_request(text)
         request_messages = self._request_messages_for_user_message(user_message, text)
         self.last_token_breakdown = self.token_counter.build_breakdown(
             request_messages,
@@ -213,6 +220,7 @@ class CodeAgent:
 
         self.last_actual_usage = usage
         self.token_usage.add(usage)
+        self._update_task_state_after_answer(text, answer)
         self.messages = [
             *self.messages,
             user_message,
@@ -242,10 +250,14 @@ class CodeAgent:
             "branch_count": len(self.branches),
             "working_memory_count": len(self.memory.working),
             "long_term_memory_count": len(self.memory.long_term),
+            "task_stage": self.memory.task_state.stage,
+            "task_current_step": self.memory.task_state.current_step,
+            "task_expected_action": self.memory.task_state.expected_action,
             "memory_tokens": memory_tokens,
             "memory_count": len(self.memory.working) + len(self.memory.long_term),
             "memory_max_tokens": self.memory_max_tokens,
             "auto_memory_updates": self.auto_memory_updates,
+            "auto_task_state_updates": self.auto_task_state_updates,
             "last_memory_error": self.last_memory_error,
             "session_total_tokens": self.token_usage.total_tokens,
             "session_prompt_tokens": self.token_usage.prompt_tokens,
@@ -417,6 +429,84 @@ class CodeAgent:
         except Exception as error:
             self.last_memory_error = str(error)
 
+    def _update_task_state_before_request(self, user_text: str) -> None:
+        if not self.auto_task_state_updates:
+            return
+        normalized = user_text.strip().lower()
+        if normalized in {"продолжай", "continue", "resume", "продолжить"}:
+            self.memory.task_state.resume()
+            self._save_history()
+            return
+        if normalized in {"пауза", "pause"}:
+            self.memory.task_state.pause()
+            self._save_history()
+            return
+        if self.memory.task_state.is_empty:
+            normalized_text = user_text.strip()
+            self.memory.task_state.current_step = normalized_text
+            self.memory.task_state.summary = normalized_text
+            self.memory.task_state.stage = "planning"
+            self.memory.task_state.expected_action = "проанализировать задачу и предложить следующий шаг"
+            self._save_history()
+
+    def _update_task_state_after_answer(self, user_text: str, answer: str) -> None:
+        if not self.auto_task_state_updates:
+            return
+        if self.memory.task_state.stage == "paused":
+            return
+
+        try:
+            state_text, usage = self._perform_request(
+                build_task_state_update_messages(self.memory.task_state, user_text, answer),
+                max_tokens=300,
+            )
+            update = parse_task_state_update_response(state_text)
+            self.memory.task_state.merge_update(update)
+            if not self.memory.task_state.current_step:
+                self.memory.task_state.current_step = user_text.strip()
+            if not self.memory.task_state.summary:
+                self.memory.task_state.summary = user_text.strip()
+            if not self.memory.task_state.expected_action:
+                self._update_task_state_with_heuristics(user_text, answer)
+                return
+            self.token_usage.add(usage)
+            self._save_history()
+        except Exception:
+            self._update_task_state_with_heuristics(user_text, answer)
+
+    def _update_task_state_with_heuristics(self, user_text: str, answer: str) -> None:
+        answer_lower = answer.lower()
+        user_lower = user_text.lower()
+
+        if any(token in answer_lower for token in ("провер", "test", "compileall", "валид")):
+            self.memory.task_state.stage = "validation"
+        elif any(token in answer_lower for token in ("готово", "заверш", "done")):
+            self.memory.task_state.stage = "done"
+        elif any(token in answer_lower for token in ("план", "шаг", "архитектур")) and not any(
+            token in answer_lower for token in ("```", "func ", "class ", "def ")
+        ):
+            self.memory.task_state.stage = "planning"
+        else:
+            self.memory.task_state.stage = "execution"
+
+        if not self.memory.task_state.summary:
+            self.memory.task_state.summary = user_text.strip()
+        if not self.memory.task_state.current_step:
+            self.memory.task_state.current_step = user_text.strip()
+
+        if self.memory.task_state.stage == "planning":
+            self.memory.task_state.expected_action = "перейти к реализации следующего шага"
+        elif self.memory.task_state.stage == "execution":
+            self.memory.task_state.expected_action = "продолжить реализацию или уточнить следующий рабочий шаг"
+        elif self.memory.task_state.stage == "validation":
+            self.memory.task_state.expected_action = "проверить результат и подтвердить завершение"
+        elif self.memory.task_state.stage == "done":
+            self.memory.task_state.expected_action = "задача завершена"
+
+        if any(token in user_lower for token in ("продолжай", "continue", "resume", "продолжить")):
+            self.memory.task_state.resume()
+        self._save_history()
+
     def _ensure_active_branch(self) -> None:
         if not self.branches:
             self.branches = {
@@ -504,6 +594,7 @@ class CodeAgent:
             "memory": self.memory.to_dict(),
             "working_memory": dict(self.memory.working),
             "long_term_memory": dict(self.memory.long_term),
+            "task_state": self.memory.task_state.to_dict(),
             "memory_tokens": self._memory_tokens(self.memory),
             "prompt_tokens_current_strategy": self.token_counter.count_messages(request_messages),
             "prompt_tokens_sliding": self.token_counter.count_messages(sliding_messages),
@@ -550,6 +641,7 @@ class CodeAgent:
             "memory": branch.memory.to_dict(),
             "working_memory": dict(branch.memory.working),
             "long_term_memory": dict(branch.memory.long_term),
+            "task_state": branch.memory.task_state.to_dict(),
             "checkpoints": sorted(branch.checkpoints),
             "prompt_tokens": self.token_counter.count_messages(request_messages),
             "last_user": self._last_message_content(branch.messages, "user"),
@@ -587,6 +679,45 @@ class CodeAgent:
         self.clear_short_term_memory()
         self.clear_working_memory()
         self.clear_long_term_memory()
+
+    def task_report(self) -> dict[str, str]:
+        return self.memory.task_state.to_dict()
+
+    def set_task_stage(self, stage: str) -> None:
+        normalized = normalize_task_stage(stage)
+        if not normalized:
+            raise CodeAgentError(
+                "Этап задачи должен быть planning, execution, validation, done или paused."
+            )
+        if normalized == "paused":
+            self.memory.task_state.pause()
+        else:
+            self.memory.task_state.set_stage(normalized)
+        self._save_history()
+
+    def set_task_current_step(self, value: str) -> None:
+        self.memory.task_state.current_step = value.strip()
+        self._save_history()
+
+    def set_task_expected_action(self, value: str) -> None:
+        self.memory.task_state.expected_action = value.strip()
+        self._save_history()
+
+    def set_task_summary(self, value: str) -> None:
+        self.memory.task_state.summary = value.strip()
+        self._save_history()
+
+    def pause_task(self) -> None:
+        self.memory.task_state.pause()
+        self._save_history()
+
+    def resume_task(self) -> None:
+        self.memory.task_state.resume()
+        self._save_history()
+
+    def clear_task_state(self) -> None:
+        self.memory.task_state.clear()
+        self._save_history()
 
     def set_memory_value(self, layer: str, key: str, value: str) -> None:
         normalized_layer = normalize_memory_layer_name(layer)

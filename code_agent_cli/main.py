@@ -128,7 +128,7 @@ def main() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="code-agent",
+        prog="agent",
         description="Standalone coding assistant for the terminal.",
     )
     parser.add_argument(
@@ -174,7 +174,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
-    print(colorize("Команды: /help, /status, /tokens, /context, /memory, /profile, /branch, /reset, /exit", MUTED))
+    print(colorize("Команды: /help, /status, /tokens, /context, /task, /memory, /profile, /branch, /reset, /exit", MUTED))
     print(colorize(session_summary(agent), MUTED))
 
     while True:
@@ -223,6 +223,10 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command == "/memory":
             handle_memory_command(agent, argument)
+            continue
+
+        if command == "/task":
+            handle_task_command(agent, argument)
             continue
 
         if command == "/profile":
@@ -333,10 +337,10 @@ def print_help() -> None:
     print_section(
         "Использование",
         (
-            "code-agent",
-            'code-agent "объясни, чем struct отличается от class в Swift"',
-            'code-agent --file Sources/App.swift "найди ошибки"',
-            'code-agent --file Sources/App.swift --range 40:120 "проверь этот участок"',
+            "agent",
+            'agent "объясни, чем struct отличается от class в Swift"',
+            'agent --file Sources/App.swift "найди ошибки"',
+            'agent --file Sources/App.swift --range 40:120 "проверь этот участок"',
         ),
     )
     print()
@@ -362,6 +366,20 @@ def print_help() -> None:
             ("/tokens текст", "посчитать токены текста без отправки в API"),
             ("/context", "показать стратегию контекста и memory layers"),
             ("/context strategy NAME", "переключить: sliding, memory, branching"),
+        )
+    )
+    print()
+    print_command_help_section(
+        "Состояние задачи",
+        (
+            ("/task", "показать формальное состояние задачи"),
+            ("/task set stage NAME", "установить этап: planning, execution, validation, done, paused"),
+            ("/task set step TEXT", "установить текущий шаг"),
+            ("/task set expected TEXT", "установить ожидаемое действие"),
+            ("/task set summary TEXT", "установить краткое описание задачи"),
+            ("/task pause", "поставить задачу на паузу"),
+            ("/task resume", "продолжить задачу с прошлого этапа"),
+            ("/task clear", "очистить формальное состояние задачи"),
         )
     )
     print()
@@ -466,11 +484,17 @@ def print_status(agent: CodeAgent) -> None:
         status_line("Веток", str(status["branch_count"])),
         status_line("Working memory", f"{status['working_memory_count']} ключей"),
         status_line("Long-term memory", f"{status['long_term_memory_count']} ключей"),
+        status_line("Task stage", str(status["task_stage"])),
         status_line("Memory tokens", str(status["memory_tokens"])),
         status_line("Memory max", f"{status['memory_max_tokens']} токенов"),
         status_line("Auto memory", "on" if status["auto_memory_updates"] else "off"),
+        status_line("Auto task state", "on" if status["auto_task_state_updates"] else "off"),
     ):
         print(line)
+    if status["task_current_step"]:
+        print(status_line("Task step", str(status["task_current_step"])))
+    if status["task_expected_action"]:
+        print(status_line("Task expected", str(status["task_expected_action"])))
 
     if status["last_memory_error"]:
         print(status_line("Ошибка memory", str(status["last_memory_error"]), WARNING))
@@ -655,7 +679,74 @@ def print_context_report(agent: CodeAgent) -> None:
         print(status_line("Ошибка memory", str(report["last_memory_error"]), WARNING))
 
     print()
+    print_task_state(agent)
+    print()
     print_memory_layers(agent, include_short=False)
+
+
+def handle_task_command(agent: CodeAgent, argument: str) -> None:
+    parts = argument.split()
+    if not parts:
+        print_task_state(agent)
+        return
+
+    action = parts[0].lower()
+    try:
+        if action == "pause" and len(parts) == 1:
+            agent.pause_task()
+            print(status_line("Task stage", agent.memory.task_state.stage, WARNING))
+            return
+        if action == "resume" and len(parts) == 1:
+            agent.resume_task()
+            print(status_line("Task stage", agent.memory.task_state.stage, SUCCESS))
+            return
+        if action == "clear" and len(parts) == 1:
+            agent.clear_task_state()
+            print(status_line("Task state", "очищено", WARNING))
+            return
+        if action == "set" and len(parts) >= 3:
+            field_name = parts[1].lower()
+            value = " ".join(parts[2:]).strip()
+            if field_name == "stage":
+                agent.set_task_stage(value)
+                print(status_line("Task stage", agent.memory.task_state.stage, SUCCESS))
+                return
+            if field_name == "step":
+                agent.set_task_current_step(value)
+                print(status_line("Task step", value, SUCCESS))
+                return
+            if field_name == "expected":
+                agent.set_task_expected_action(value)
+                print(status_line("Task expected", value, SUCCESS))
+                return
+            if field_name == "summary":
+                agent.set_task_summary(value)
+                print(status_line("Task summary", value, SUCCESS))
+                return
+            print("Использование: /task set stage|step|expected|summary ...")
+            return
+    except (CodeAgentError, OSError) as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return
+
+    print(
+        "Использование: /task | /task set stage|step|expected|summary ... | "
+        "/task pause | /task resume | /task clear"
+    )
+
+
+def print_task_state(agent: CodeAgent) -> None:
+    task_state = agent.task_report()
+    print(header_line("Task State"))
+    print(status_line("stage", task_state.get("stage", "planning")))
+    if task_state.get("current_step"):
+        print(status_line("current_step", task_state["current_step"]))
+    if task_state.get("expected_action"):
+        print(status_line("expected_action", task_state["expected_action"]))
+    if task_state.get("summary"):
+        print(status_line("summary", task_state["summary"]))
+    if task_state.get("previous_stage"):
+        print(status_line("previous_stage", task_state["previous_stage"], MUTED))
 
 
 def handle_memory_command(agent: CodeAgent, argument: str) -> None:
@@ -877,6 +968,7 @@ def print_branch_report(agent: CodeAgent) -> None:
             f"{branch['messages']} сообщений, "
             f"{len(branch['working_memory'])} working, "
             f"{len(branch['long_term_memory'])} long-term, "
+            f"{branch['task_state'].get('stage', 'planning')} task, "
             f"{branch['prompt_tokens']} prompt tokens, "
             f"{len(branch['checkpoints'])} checkpoints"
         )
@@ -885,6 +977,8 @@ def print_branch_report(agent: CodeAgent) -> None:
             print(status_line("  последний user", shorten_text(branch["last_user"], 88), MUTED))
         if branch["current_task"]:
             print(status_line("  current_task", shorten_text(branch["current_task"], 88), MUTED))
+        if branch["task_state"].get("current_step"):
+            print(status_line("  task_step", shorten_text(branch["task_state"]["current_step"], 88), MUTED))
         elif branch["goal"]:
             print(status_line("  goal", shorten_text(branch["goal"], 88), MUTED))
 
