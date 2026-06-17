@@ -266,6 +266,16 @@ def build_prompt(args: argparse.Namespace) -> PromptPayload:
 
 def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
     payload = normalize_prompt(prompt)
+    fast_answer = agent.handle_memory_only_message(
+        payload.request_text,
+        history_text=payload.history_text,
+    )
+    if fast_answer is not None:
+        print()
+        print_agent_answer(fast_answer)
+        print()
+        return True
+
     estimated_tokens = agent.estimate_tokens(
         payload.request_text,
         history_text=payload.history_text,
@@ -388,9 +398,6 @@ def print_help() -> None:
         (
             ("/memory", "показать short-term, working и long-term память"),
             ("/memory short|working|long", "показать отдельный слой памяти"),
-            ("/memory set working KEY VALUE", "явно сохранить VALUE в рабочую память"),
-            ("/memory set long KEY VALUE", "явно сохранить VALUE в профиль profile.md"),
-            ("/memory delete working|long KEY", "удалить ключ из выбранного слоя"),
             ("/memory clear short", "очистить краткосрочную память диалога"),
             ("/memory clear working", "очистить рабочую память текущей задачи"),
             ("/memory clear long", "очистить долговременную память"),
@@ -402,8 +409,7 @@ def print_help() -> None:
         "Профиль",
         (
             ("/profile", "показать профиль пользователя из profile.md"),
-            ("/profile set KEY VALUE", "явно сохранить VALUE в профиль"),
-            ("/profile delete KEY", "удалить ключ из профиля"),
+            ("/profile path", "показать путь к profile.md"),
             ("/profile clear", "очистить profile.md"),
         )
     )
@@ -803,32 +809,8 @@ def handle_memory_command(agent: CodeAgent, argument: str) -> None:
             print(status_line("Memory", "полностью очищена", WARNING))
             return
 
-    if len(parts) >= 4 and parts[0].lower() == "set":
-        layer = parts[1]
-        key = parts[2]
-        value = " ".join(parts[3:]).strip()
-        try:
-            agent.set_memory_value(layer, key, value)
-        except (CodeAgentError, OSError) as error:
-            print(f"Ошибка: {error}", file=sys.stderr)
-            return
-        print(status_line(f"{layer}.{key}", value, SUCCESS))
-        return
-
-    if len(parts) == 3 and parts[0].lower() in {"delete", "del", "remove", "rm"}:
-        layer = parts[1]
-        key = parts[2]
-        try:
-            agent.delete_memory_value(layer, key)
-        except (CodeAgentError, OSError) as error:
-            print(f"Ошибка: {error}", file=sys.stderr)
-            return
-        print(status_line(f"{layer}.{key}", "удалено", WARNING))
-        return
-
     print(
         "Использование: /memory | /memory short|working|long | "
-        "/memory set working|long KEY VALUE | /memory delete working|long KEY | "
         "/memory clear short|working|long|all"
     )
 
@@ -888,30 +870,8 @@ def handle_profile_command(agent: CodeAgent, argument: str) -> None:
         print(status_line("Профиль", "очищен", WARNING))
         return
 
-    if action == "set" and len(parts) >= 3:
-        key = parts[1]
-        value = " ".join(parts[2:]).strip()
-        try:
-            agent.set_memory_value("long", key, value)
-        except OSError as error:
-            print(f"Ошибка: {error}", file=sys.stderr)
-            return
-        print(status_line(f"profile.{key}", value, SUCCESS))
-        return
-
-    if action in {"delete", "del", "remove", "rm"} and len(parts) == 2:
-        key = parts[1]
-        try:
-            agent.delete_memory_value("long", key)
-        except OSError as error:
-            print(f"Ошибка: {error}", file=sys.stderr)
-            return
-        print(status_line(f"profile.{key}", "удалено", WARNING))
-        return
-
     print(
-        "Использование: /profile | /profile path | /profile set KEY VALUE | "
-        "/profile delete KEY | /profile clear"
+        "Использование: /profile | /profile path | /profile clear"
     )
 
 

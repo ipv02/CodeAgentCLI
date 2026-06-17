@@ -146,15 +146,11 @@ CLI считает токены локально перед запросом и 
 /memory short
 /memory working
 /memory long
-/memory set working current_task реализовать memory layers
-/memory set long preferences сначала объяснять архитектуру
-/memory delete working current_task
 /memory clear short
 /memory clear working
 /memory clear all
 /profile
-/profile set preferences сначала объяснять архитектуру
-/profile delete preferences
+/profile path
 /branch list
 /branch compare variant-a variant-b
 /branch checkpoint base
@@ -193,26 +189,28 @@ export CODE_AGENT_CONTEXT_STRATEGY="sliding"
 - `long-term` — профиль, предпочтения, устойчивые решения проекта и знания.
 
 `short-term` и `working` сохраняются в `history.json`, а `long-term`
-сохраняется отдельно в Markdown-файле `profile.md`. Такой профиль можно
-просматривать и редактировать вручную. Если в старой истории встречается
+сохраняется отдельно в Markdown-файле `profile.md`. Если в старой истории встречается
 `memory.long_term`, агент не переносит его в профиль и удаляет из JSON при
 следующем сохранении истории.
 
-По умолчанию агент сам не решает, что сохранять в `working` или `long-term`.
-Пользователь явно выбирает слой командой:
+По умолчанию `auto memory` включен. На каждом сообщении пользователя агент
+запускает внутренний memory router и сам решает, что сохранить:
 
 ```text
-/memory set working current_task реализовать memory layers
-/memory set working files agent.py, context.py, storage.py
-/memory set long preferences сначала объяснять архитектуру, потом писать код
-/memory set long project_decisions CodeAgentCLI запускается через code-agent
+- в working: текущую задачу, файлы, риски, временные ограничения
+- в long-term: профиль пользователя, предпочтения, устойчивые решения и знания
+- в discard: шум, приветствия и одноразовые фразы
 ```
 
-Удаление также явное:
+Память теперь не редактируется вручную из CLI. Доступны только просмотр и очистка:
 
 ```text
-/memory delete working files
-/memory delete long preferences
+/memory
+/memory working
+/memory long
+/memory clear working
+/memory clear long
+/memory clear all
 ```
 
 В запрос отправляется:
@@ -276,14 +274,11 @@ Task state сохраняется в `history.json` вместе с рабоче
 ```text
 /profile
 /profile path
-/profile set profile Пользователь разрабатывает iOS-приложения.
-/profile set preferences Отвечать на русском, сначала кратко объяснять архитектуру.
-/profile set constraints Не использовать UIKit без необходимости.
-/profile delete constraints
 /profile clear
 ```
 
-Профиль автоматически подключается к каждому запросу в стратегии `memory`.
+Профиль автоматически наполняется memory router'ом из диалога и подключается к
+каждому запросу в стратегии `memory`.
 
 Проверить разные профили можно разными файлами:
 
@@ -292,11 +287,10 @@ CODE_AGENT_PROFILE_FILE=/tmp/profile-ios.md agent
 CODE_AGENT_PROFILE_FILE=/tmp/profile-backend.md agent
 ```
 
-Если нужен экспериментальный автоматический memory router через LLM, его можно
-включить отдельно:
+Если нужно отключить automatic memory routing:
 
 ```bash
-export CODE_AGENT_AUTO_MEMORY="1"
+export CODE_AGENT_AUTO_MEMORY="0"
 ```
 
 ### Branching

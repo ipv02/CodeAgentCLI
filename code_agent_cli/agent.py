@@ -101,15 +101,6 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on", "да"}
 
 
-def normalize_memory_layer_name(value: str) -> str:
-    layer = value.strip().lower()
-    if layer in {"working", "work"}:
-        return "working"
-    if layer in {"long", "long-term", "long_term"}:
-        return "long_term"
-    raise CodeAgentError("Слой памяти должен быть working или long.")
-
-
 @dataclass
 class CodeAgent:
     api_key: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""))
@@ -130,7 +121,7 @@ class CodeAgent:
         default_factory=lambda: env_int("CODE_AGENT_MEMORY_MAX_TOKENS", 1200)
     )
     auto_memory_updates: bool = field(
-        default_factory=lambda: env_bool("CODE_AGENT_AUTO_MEMORY", False)
+        default_factory=lambda: env_bool("CODE_AGENT_AUTO_MEMORY", True)
     )
     auto_task_state_updates: bool = field(
         default_factory=lambda: env_bool("CODE_AGENT_AUTO_TASK_STATE", True)
@@ -213,6 +204,44 @@ class CodeAgent:
             self._message("assistant", answer),
         ]
         self._trim_history_if_needed()
+        self._save_history()
+        return answer
+
+    def handle_memory_only_message(self, text: str, history_text: str | None = None) -> str | None:
+        if self.context_strategy not in {MEMORY_STRATEGY, BRANCHING_STRATEGY}:
+            return None
+        if not self.auto_memory_updates:
+            return None
+        if not self.memory_agent.is_memory_only_intent(text):
+            return None
+
+        before_working = dict(self.memory.working)
+        before_long_term = dict(self.memory.long_term)
+        self._update_memory_if_needed(text)
+        self._update_task_state_before_request(text)
+
+        working_changed = before_working != self.memory.working
+        long_term_changed = before_long_term != self.memory.long_term
+        if long_term_changed and working_changed:
+            answer = "Память обновлена: профиль и данные текущей задачи сохранены."
+        elif long_term_changed:
+            answer = "Профиль обновлен."
+        elif working_changed:
+            answer = "Рабочая память обновлена."
+        elif self.last_memory_error:
+            answer = "Не удалось обновить память автоматически."
+        else:
+            answer = "Новых данных для памяти не найдено."
+
+        user_message = self._message("user", history_text or text)
+        self.messages = [
+            *self.messages,
+            user_message,
+            self._message("assistant", answer),
+        ]
+        self._trim_history_if_needed()
+        self.last_token_breakdown = None
+        self.last_actual_usage = {}
         self._save_history()
         return answer
 
@@ -401,21 +430,37 @@ class CodeAgent:
                 self.memory,
                 user_text,
             )
-            self.branches[self.active_branch].memory.working.update(working)
-            for key, value in working.items():
-                if not value.strip():
-                    self.branches[self.active_branch].memory.working.pop(key, None)
-            self.branches[self.active_branch].memory.long_term.update(long_term)
-            for key, value in long_term.items():
-                if not value.strip():
-                    self.branches[self.active_branch].memory.long_term.pop(key, None)
-            if long_term:
-                self._sync_long_term_memory()
-                self.profile_storage.save(self.memory.long_term)
+            self._apply_memory_update(user_text, working, long_term)
             self.token_usage.add(usage)
             self.last_memory_error = ""
         except Exception as error:
             self.last_memory_error = str(error)
+            fallback_working, fallback_long_term = self.memory_agent.enrich_with_fallback(
+                user_text,
+                {},
+                {},
+            )
+            if fallback_working or fallback_long_term:
+                self._apply_memory_update(user_text, fallback_working, fallback_long_term)
+
+    def _apply_memory_update(
+        self,
+        user_text: str,
+        working: dict[str, str],
+        long_term: dict[str, str],
+    ) -> None:
+        del user_text
+        self.branches[self.active_branch].memory.working.update(working)
+        for key, value in working.items():
+            if not value.strip():
+                self.branches[self.active_branch].memory.working.pop(key, None)
+        self.branches[self.active_branch].memory.long_term.update(long_term)
+        for key, value in long_term.items():
+            if not value.strip():
+                self.branches[self.active_branch].memory.long_term.pop(key, None)
+        if long_term:
+            self._sync_long_term_memory()
+            self.profile_storage.save(self.memory.long_term)
 
     def _update_task_state_before_request(self, user_text: str) -> None:
         if not self.auto_task_state_updates:
@@ -659,30 +704,6 @@ class CodeAgent:
 
     def clear_task_state(self) -> None:
         self.memory.task_state.clear()
-        self._save_history()
-
-    def set_memory_value(self, layer: str, key: str, value: str) -> None:
-        normalized_layer = normalize_memory_layer_name(layer)
-        if normalized_layer == "working":
-            self.memory.working[key] = value
-            self._save_history()
-            return
-
-        self.memory.long_term[key] = value
-        self._sync_long_term_memory()
-        self.profile_storage.save(self.memory.long_term)
-        self._save_history()
-
-    def delete_memory_value(self, layer: str, key: str) -> None:
-        normalized_layer = normalize_memory_layer_name(layer)
-        if normalized_layer == "working":
-            self.memory.working.pop(key, None)
-            self._save_history()
-            return
-
-        self.memory.long_term.pop(key, None)
-        self._sync_long_term_memory()
-        self.profile_storage.save(self.memory.long_term)
         self._save_history()
 
     @staticmethod

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -82,6 +83,37 @@ class ResponseAgent:
 @dataclass
 class MemoryAgent:
     max_tokens: int = 1200
+    working_key_aliases: dict[str, str] = field(
+        default_factory=lambda: {
+            "task": "current_task",
+            "currentTask": "current_task",
+            "file": "files",
+            "risk": "risks",
+            "constraint": "temporary_constraints",
+        }
+    )
+    long_term_key_aliases: dict[str, str] = field(
+        default_factory=lambda: {
+            "role": "user_role",
+            "user_profile": "user_role",
+            "framework": "preferred_framework",
+            "preferred_language": "language_preference",
+            "language": "language_preference",
+            "architecture": "architecture_preference",
+        }
+    )
+    memory_only_prefixes: tuple[str, ...] = (
+        "запомни",
+        "запомни,",
+        "remember",
+        "remember that",
+        "сохрани в память",
+        "запиши в память",
+    )
+
+    def is_memory_only_intent(self, user_text: str) -> bool:
+        normalized = user_text.strip().lower()
+        return any(normalized.startswith(prefix) for prefix in self.memory_only_prefixes)
 
     def run(
         self,
@@ -95,6 +127,73 @@ class MemoryAgent:
         )
         update = parse_memory_update_response(response_text)
         return update.working, update.long_term, update.discard, usage
+
+    def enrich_with_fallback(
+        self,
+        user_text: str,
+        working: dict[str, str],
+        long_term: dict[str, str],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        fallback_working, fallback_long_term = self.extract_fallback(user_text)
+        merged_working = self.normalize_working_keys({**fallback_working, **working})
+        merged_long_term = self.normalize_long_term_keys({**fallback_long_term, **long_term})
+        return merged_working, merged_long_term
+
+    def extract_fallback(self, user_text: str) -> tuple[dict[str, str], dict[str, str]]:
+        text = user_text.strip()
+        lower = text.lower()
+        working: dict[str, str] = {}
+        long_term: dict[str, str] = {}
+
+        if any(token in lower for token in ("я ios-разработчик", "я iOS-разработчик".lower(), "ios developer")):
+            long_term["user_role"] = "iOS-разработчик"
+        if "swiftui" in lower:
+            long_term["preferred_framework"] = "SwiftUI"
+        if any(token in lower for token in ("на русском", "по-русски", "русском")):
+            long_term["language_preference"] = "русский"
+        if "production-grade" in lower:
+            long_term["architecture_preference"] = "production-grade"
+
+        files_match = re.search(r"(?:рабочие\s+файлы|files?)\s*:\s*(.+)", text, re.IGNORECASE)
+        if files_match:
+            files_value = re.split(r"(?:\.\s+риск\s*:|\.\s+риски\s*:)", files_match.group(1), maxsplit=1, flags=re.IGNORECASE)[0]
+            working["files"] = files_value.strip().rstrip(".")
+
+        risks_match = re.search(r"(?:риск|риски)\s*:\s*(.+)", text, re.IGNORECASE)
+        if risks_match:
+            working["risks"] = risks_match.group(1).strip().rstrip(".")
+
+        constraints_match = re.search(r"(?:ограничения|constraints?)\s*:\s*(.+)", text, re.IGNORECASE)
+        if constraints_match:
+            working["temporary_constraints"] = constraints_match.group(1).strip().rstrip(".")
+
+        sentence_parts = re.split(r"[.!?]\s+", text)
+        for part in sentence_parts:
+            candidate = part.strip()
+            lower_candidate = candidate.lower()
+            if not candidate:
+                continue
+            if any(token in lower_candidate for token in ("сейчас", "проектируем", "делаем", "задача", "нужно")):
+                if "рабочие файлы" in lower_candidate or "риск:" in lower_candidate or "риски:" in lower_candidate:
+                    continue
+                working["current_task"] = candidate.rstrip(".")
+                break
+
+        return working, long_term
+
+    def normalize_working_keys(self, working: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, value in working.items():
+            target_key = self.working_key_aliases.get(key, key)
+            normalized[target_key] = value
+        return normalized
+
+    def normalize_long_term_keys(self, long_term: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, value in long_term.items():
+            target_key = self.long_term_key_aliases.get(key, key)
+            normalized[target_key] = value
+        return normalized
 
 
 @dataclass
