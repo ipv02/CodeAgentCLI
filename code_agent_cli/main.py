@@ -174,7 +174,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
-    print(colorize("Команды: /help, /status, /tokens, /context, /task, /memory, /profile, /branch, /reset, /exit", MUTED))
+    print(colorize("Команды: /help, /status, /tokens, /context, /task, /memory, /profile, /invariants, /branch, /reset, /exit", MUTED))
     print(colorize(session_summary(agent), MUTED))
 
     while True:
@@ -198,7 +198,7 @@ def run_interactive_session(agent: CodeAgent) -> None:
             except OSError as error:
                 print(f"Ошибка: {error}", file=sys.stderr)
                 continue
-            print("Агент полностью очищен.")
+            print("История, память, профиль и ветки очищены. Инварианты сохранены.")
             continue
 
         if text == "/help":
@@ -231,6 +231,10 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command == "/profile":
             handle_profile_command(agent, argument)
+            continue
+
+        if command in {"/invariants", "/invariant"}:
+            handle_invariants_command(agent, argument)
             continue
 
         if command == "/branch":
@@ -364,7 +368,7 @@ def print_help() -> None:
         (
             ("/help", "показать помощь"),
             ("/status", "показать настройки текущей сессии"),
-            ("/reset", "полностью очистить агента: историю, память, профиль и ветки"),
+            ("/reset", "очистить историю, память, профиль и ветки; инварианты сохраняются"),
             ("/exit", "выйти"),
         )
     )
@@ -402,6 +406,17 @@ def print_help() -> None:
             ("/memory clear working", "очистить рабочую память текущей задачи"),
             ("/memory clear long", "очистить долговременную память"),
             ("/memory clear all", "очистить всю память: short-term, working и long-term"),
+        )
+    )
+    print()
+    print_command_help_section(
+        "Инварианты",
+        (
+            ("/invariants", "показать обязательные ограничения ассистента"),
+            ("/invariants add TEXT", "добавить инвариант"),
+            ("/invariants delete N", "удалить инвариант по номеру"),
+            ("/invariants clear", "очистить список инвариантов"),
+            ("/invariants path", "показать путь к invariants.md"),
         )
     )
     print()
@@ -490,6 +505,7 @@ def print_status(agent: CodeAgent) -> None:
         status_line("Веток", str(status["branch_count"])),
         status_line("Working memory", f"{status['working_memory_count']} ключей"),
         status_line("Long-term memory", f"{status['long_term_memory_count']} ключей"),
+        status_line("Invariants", f"{status['invariant_count']} правил"),
         status_line("Task stage", str(status["task_stage"])),
         status_line("Memory tokens", str(status["memory_tokens"])),
         status_line("Memory max", f"{status['memory_max_tokens']} токенов"),
@@ -504,6 +520,8 @@ def print_status(agent: CodeAgent) -> None:
 
     if status["last_memory_error"]:
         print(status_line("Ошибка memory", str(status["last_memory_error"]), WARNING))
+    if status["last_invariant_error"]:
+        print(status_line("Ошибка invariant", str(status["last_invariant_error"]), WARNING))
 
     print()
     print(header_line("История"))
@@ -511,6 +529,7 @@ def print_status(agent: CodeAgent) -> None:
         status_line("Сообщения", f"{history} сообщений"),
         status_line("Файл истории", str(status["history_file"])),
         status_line("Файл профиля", str(status["profile_file"])),
+        status_line("Файл инвариантов", str(status["invariants_file"])),
         status_line("Состояние истории", history_loaded),
     ):
         print(line)
@@ -559,6 +578,7 @@ def print_current_token_state(agent: CodeAgent, request_text: str | None = None)
         status_line("Стратегия", str(status["context_strategy"])),
         status_line("Активная ветка", str(status["active_branch"])),
         status_line("Memory tokens", str(status["memory_tokens"])),
+        status_line("Invariant tokens", str(agent.context_report()["invariant_tokens"])),
         status_line("Сессия total", str(status["session_total_tokens"]), VALUE),
         status_line("Сессия prompt", str(status["session_prompt_tokens"])),
         status_line("Сессия answer", str(status["session_completion_tokens"])),
@@ -594,6 +614,8 @@ def print_last_token_report(agent: CodeAgent) -> None:
     report = agent.context_report()
     if report["memory_tokens"]:
         print(status_line("Memory layers", f"{report['memory_tokens']} токенов"))
+    if report["invariant_tokens"]:
+        print(status_line("Invariants", f"{report['invariant_tokens']} токенов"))
     if actual_total:
         print(status_line("Ответ модели", f"{actual_answer} (API)", SUCCESS))
         print()
@@ -678,16 +700,21 @@ def print_context_report(agent: CodeAgent) -> None:
         status_line("Prompt tokens", str(report["prompt_tokens_current_strategy"])),
         status_line("Sliding tokens", str(report["prompt_tokens_sliding"])),
         status_line("Memory tokens", str(report["memory_tokens"])),
+        status_line("Invariant tokens", str(report["invariant_tokens"])),
     ):
         print(line)
 
     if report["last_memory_error"]:
         print(status_line("Ошибка memory", str(report["last_memory_error"]), WARNING))
+    if report["last_invariant_error"]:
+        print(status_line("Ошибка invariant", str(report["last_invariant_error"]), WARNING))
 
     print()
     print_task_state(agent)
     print()
     print_memory_layers(agent, include_short=False)
+    print()
+    print_invariants(agent)
 
 
 def handle_task_command(agent: CodeAgent, argument: str) -> None:
@@ -880,6 +907,59 @@ def print_profile(agent: CodeAgent) -> None:
     print(status_line("Файл", str(agent.profile_storage.path), VALUE))
     print()
     print_memory_layer("Long-term memory", agent.memory.long_term)
+
+
+def handle_invariants_command(agent: CodeAgent, argument: str) -> None:
+    parts = argument.split()
+    if not parts:
+        print_invariants(agent)
+        return
+
+    action = parts[0].lower()
+    try:
+        if action == "path" and len(parts) == 1:
+            print(status_line("Файл инвариантов", str(agent.invariant_storage.path), VALUE))
+            return
+        if action == "add" and len(parts) >= 2:
+            invariant = " ".join(parts[1:]).strip()
+            agent.add_invariant(invariant)
+            print(status_line("Инвариант добавлен", invariant, SUCCESS))
+            return
+        if action in {"delete", "del", "remove", "rm"} and len(parts) == 2:
+            try:
+                index = int(parts[1])
+            except ValueError:
+                print("Ошибка: номер инварианта должен быть числом.", file=sys.stderr)
+                return
+            removed = agent.delete_invariant(index)
+            print(status_line("Инвариант удален", removed, WARNING))
+            return
+        if action == "clear" and len(parts) == 1:
+            agent.clear_invariants()
+            print(status_line("Инварианты", "очищены", WARNING))
+            return
+    except (CodeAgentError, OSError) as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return
+
+    print(
+        "Использование: /invariants | /invariants add TEXT | "
+        "/invariants delete N | /invariants clear | /invariants path"
+    )
+
+
+def print_invariants(agent: CodeAgent) -> None:
+    report = agent.invariants_report()
+    print(header_line("Инварианты"))
+    print(status_line("Файл", str(report["path"]), VALUE))
+    print(status_line("Количество", str(report["count"])))
+    print(status_line("Токены", str(report["tokens"])))
+    invariants = report["invariants"]
+    if not invariants:
+        print(status_line("Состояние", "пусто", WARNING))
+        return
+    for index, invariant in enumerate(invariants, start=1):
+        print(status_line(str(index), invariant))
 
 
 def handle_branch_command(agent: CodeAgent, argument: str) -> None:

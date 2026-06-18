@@ -19,6 +19,11 @@ from code_agent_cli.context import (
     normalize_strategy,
     trim_visible_messages,
 )
+from code_agent_cli.invariants import (
+    InvariantAgent,
+    InvariantStorage,
+    default_invariants_file,
+)
 from code_agent_cli.memory import (
     MemoryState,
     ProfileStorage,
@@ -138,10 +143,12 @@ class CodeAgent:
     temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
     history_file: Path = field(default_factory=default_history_file)
     profile_file: Path = field(default_factory=default_profile_file)
+    invariants_file: Path = field(default_factory=default_invariants_file)
 
     def __post_init__(self) -> None:
         self.history_file = Path(self.history_file)
         self.profile_file = Path(self.profile_file)
+        self.invariants_file = Path(self.invariants_file)
         self.token_usage = TokenUsage()
         self.token_counter = TokenCounter(
             self.model,
@@ -154,12 +161,16 @@ class CodeAgent:
         self.last_token_breakdown: TokenBreakdown | None = None
         self.last_actual_usage: dict[str, Any] = {}
         self.last_memory_error = ""
+        self.last_invariant_error = ""
         self.history_storage = HistoryStorage(self.history_file)
         self.profile_storage = ProfileStorage(self.profile_file)
+        self.invariant_storage = InvariantStorage(self.invariants_file)
         self.response_agent = ResponseAgent()
         self.memory_agent = MemoryAgent(max_tokens=self.memory_max_tokens)
         self.task_state_agent = TaskStateAgent()
+        self.invariant_agent = InvariantAgent()
         self.history_loaded = False
+        self.invariants = self.invariant_storage.load()
         self.branches: dict[str, BranchState] = {}
         self.active_branch = DEFAULT_BRANCH
         self.messages = self._load_history()
@@ -178,10 +189,20 @@ class CodeAgent:
         if not self.last_token_breakdown.fits_context:
             raise ContextLimitExceededError(self.last_token_breakdown)
 
+        conflict_answer = self._refuse_if_heuristic_invariant_conflict(text)
+        if conflict_answer is not None:
+            self._save_answer_to_history(user_message, conflict_answer)
+            return conflict_answer
+
         if not self.api_key:
             raise MissingAPIKeyError(
                 'Не задан DEEPSEEK_API_KEY. Выполните: export DEEPSEEK_API_KEY="ваш_ключ"'
             )
+
+        conflict_answer = self._refuse_if_invariant_conflict(text)
+        if conflict_answer is not None:
+            self._save_answer_to_history(user_message, conflict_answer)
+            return conflict_answer
 
         self._update_memory_if_needed(text)
         self._update_task_state_before_request(text)
@@ -265,6 +286,7 @@ class CodeAgent:
             "branch_count": len(self.branches),
             "working_memory_count": len(self.memory.working),
             "long_term_memory_count": len(self.memory.long_term),
+            "invariant_count": len(self.invariants),
             "task_stage": self.memory.task_state.stage,
             "task_current_step": self.memory.task_state.current_step,
             "task_expected_action": self.memory.task_state.expected_action,
@@ -274,11 +296,13 @@ class CodeAgent:
             "auto_memory_updates": self.auto_memory_updates,
             "auto_task_state_updates": self.auto_task_state_updates,
             "last_memory_error": self.last_memory_error,
+            "last_invariant_error": self.last_invariant_error,
             "session_total_tokens": self.token_usage.total_tokens,
             "session_prompt_tokens": self.token_usage.prompt_tokens,
             "session_completion_tokens": self.token_usage.completion_tokens,
             "history_file": str(self.history_storage.path),
             "profile_file": str(self.profile_storage.path),
+            "invariants_file": str(self.invariant_storage.path),
             "history_loaded": self.history_loaded,
         }
 
@@ -295,6 +319,7 @@ class CodeAgent:
         self.messages = self.branches[self.active_branch].messages
         self.memory.long_term = self.profile_storage.load()
         self.last_memory_error = ""
+        self.last_invariant_error = ""
         self.history_loaded = False
         self._save_history()
 
@@ -303,6 +328,7 @@ class CodeAgent:
         self.token_usage = TokenUsage()
         self.last_token_breakdown = None
         self.last_actual_usage = {}
+        self.last_invariant_error = ""
         self.reset_history()
 
     @property
@@ -400,23 +426,100 @@ class CodeAgent:
             self.max_history_messages,
         )
         memory = self.memory if self.context_strategy in {MEMORY_STRATEGY, BRANCHING_STRATEGY} else MemoryState()
-        return self.response_agent.build_request_messages(
+        request_messages = self.response_agent.build_request_messages(
             self.messages[0],
             memory,
             recent_messages,
             history_user_message,
             request_text,
         )
+        return self._with_invariant_messages(request_messages)
 
     def _messages_with_memory(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
         memory = self.memory if self.context_strategy in {MEMORY_STRATEGY, BRANCHING_STRATEGY} else MemoryState()
-        return self.response_agent.build_request_messages(
+        request_messages = self.response_agent.build_request_messages(
             messages[0],
             memory,
             trim_visible_messages(messages[1:], self.max_history_messages),
             self._message("user", ""),
             "",
-        )[:-1]
+        )
+        return self._with_invariant_messages(request_messages)[:-1]
+
+    def _save_answer_to_history(
+        self,
+        user_message: dict[str, str],
+        answer: str,
+    ) -> None:
+        self.messages = [
+            *self.messages,
+            user_message,
+            self._message("assistant", answer),
+        ]
+        self._trim_history_if_needed()
+        self._save_history()
+
+    def _with_invariant_messages(
+        self,
+        messages: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        invariant_messages = self.invariant_agent.build_policy_messages(self.invariants)
+        if not invariant_messages:
+            return messages
+        return [messages[0], *invariant_messages, *messages[1:]]
+
+    def _refuse_if_invariant_conflict(self, user_text: str) -> str | None:
+        if not self.invariants:
+            return None
+
+        try:
+            result, usage = self.invariant_agent.check_conflict(
+                self._perform_request,
+                self.invariants,
+                user_text,
+            )
+            self.token_usage.add(usage)
+            self.last_invariant_error = ""
+        except Exception as error:
+            self.last_invariant_error = str(error)
+            result = self.invariant_agent.check_conflict_with_heuristics(
+                self.invariants,
+                user_text,
+            )
+
+        if not result.conflict:
+            return None
+
+        return self._build_invariant_refusal(result)
+
+    def _refuse_if_heuristic_invariant_conflict(self, user_text: str) -> str | None:
+        if not self.invariants:
+            return None
+
+        result = self.invariant_agent.check_conflict_with_heuristics(
+            self.invariants,
+            user_text,
+        )
+        if not result.conflict:
+            return None
+
+        return self._build_invariant_refusal(result)
+
+    def _build_invariant_refusal(self, result: Any) -> str:
+        violated = result.violated_invariants or self.invariants
+        lines = [
+            "Не могу предложить решение в таком виде: запрос конфликтует с обязательными инвариантами.",
+            "",
+            "Нарушаемые инварианты:",
+            *[f"- {invariant}" for invariant in violated],
+        ]
+        if result.explanation:
+            lines.extend(("", f"Причина: {result.explanation}"))
+        if result.safe_alternative:
+            lines.extend(("", f"Безопасная альтернатива: {result.safe_alternative}"))
+        else:
+            lines.extend(("", "Могу помочь переформулировать задачу так, чтобы сохранить эти ограничения."))
+        return "\n".join(lines)
 
     def _update_memory_if_needed(self, user_text: str) -> None:
         if self.context_strategy not in {MEMORY_STRATEGY, BRANCHING_STRATEGY}:
@@ -586,6 +689,8 @@ class CodeAgent:
             "memory": self.memory.to_dict(),
             "working_memory": dict(self.memory.working),
             "long_term_memory": dict(self.memory.long_term),
+            "invariants": list(self.invariants),
+            "invariant_tokens": self._invariant_tokens(),
             "task_state": self.memory.task_state.to_dict(),
             "memory_tokens": self._memory_tokens(self.memory),
             "prompt_tokens_current_strategy": self.token_counter.count_messages(request_messages),
@@ -593,6 +698,7 @@ class CodeAgent:
             "messages": max(len(self.messages) - 1, 0),
             "max_messages": self.max_history_messages,
             "last_memory_error": self.last_memory_error,
+            "last_invariant_error": self.last_invariant_error,
         }
 
     def branch_report(self) -> dict[str, Any]:
@@ -644,13 +750,14 @@ class CodeAgent:
 
     def _messages_with_branch_memory(self, branch: BranchState) -> list[dict[str, str]]:
         memory = branch.memory if self.context_strategy in {MEMORY_STRATEGY, BRANCHING_STRATEGY} else MemoryState()
-        return build_request_messages(
+        request_messages = build_request_messages(
             branch.messages[0],
             memory,
             trim_visible_messages(branch.messages[1:], self.max_history_messages),
             self._message("user", ""),
             "",
-        )[:-1]
+        )
+        return self._with_invariant_messages(request_messages)[:-1]
 
     def clear_working_memory(self) -> None:
         self.memory.clear_working()
@@ -671,6 +778,33 @@ class CodeAgent:
         self.clear_short_term_memory()
         self.clear_working_memory()
         self.clear_long_term_memory()
+
+    def invariants_report(self) -> dict[str, Any]:
+        return {
+            "path": str(self.invariant_storage.path),
+            "invariants": list(self.invariants),
+            "count": len(self.invariants),
+            "tokens": self._invariant_tokens(),
+        }
+
+    def add_invariant(self, value: str) -> None:
+        invariant = value.strip()
+        if not invariant:
+            raise CodeAgentError("Инвариант не должен быть пустым.")
+        if invariant not in self.invariants:
+            self.invariants.append(invariant)
+            self.invariant_storage.save(self.invariants)
+
+    def delete_invariant(self, index: int) -> str:
+        if index < 1 or index > len(self.invariants):
+            raise CodeAgentError("Инвариант с таким номером не найден.")
+        removed = self.invariants.pop(index - 1)
+        self.invariant_storage.save(self.invariants)
+        return removed
+
+    def clear_invariants(self) -> None:
+        self.invariants = []
+        self.invariant_storage.save(self.invariants)
 
     def task_report(self) -> dict[str, str]:
         return self.memory.task_state.to_dict()
@@ -740,6 +874,12 @@ class CodeAgent:
             "",
         )[1:-1]
         return self.token_counter.count_messages(memory_only_messages)
+
+    def _invariant_tokens(self) -> int:
+        invariant_messages = self.invariant_agent.build_policy_messages(self.invariants)
+        if not invariant_messages:
+            return 0
+        return self.token_counter.count_messages(invariant_messages)
 
     @staticmethod
     def _message(role: str, content: str) -> dict[str, str]:

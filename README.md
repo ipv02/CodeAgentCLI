@@ -61,6 +61,7 @@ agent
 /task
 /memory
 /profile
+/invariants
 /reset
 /exit
 /quit
@@ -72,12 +73,18 @@ agent
 ~/.code-agent-cli/history.json
 ```
 
-При следующем запуске `agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` полностью очищает агента: историю, память, профиль и ветки.
+При следующем запуске `agent` загрузит сохраненные сообщения и продолжит диалог с прошлым контекстом. Команда `/reset` очищает историю, память, профиль и ветки. Инварианты сохраняются отдельно и очищаются только командой `/invariants clear`.
 
 Долговременная память профиля хранится отдельно:
 
 ```text
 ~/.code-agent-cli/profile.md
+```
+
+Обязательные инварианты ассистента хранятся отдельно от диалога и профиля:
+
+```text
+~/.code-agent-cli/invariants.md
 ```
 
 Одноразовый запрос:
@@ -151,6 +158,10 @@ CLI считает токены локально перед запросом и 
 /memory clear all
 /profile
 /profile path
+/invariants
+/invariants add не менять выбранную архитектуру без явного решения пользователя
+/invariants delete 1
+/invariants clear
 /branch list
 /branch compare variant-a variant-b
 /branch checkpoint base
@@ -193,6 +204,13 @@ export CODE_AGENT_CONTEXT_STRATEGY="sliding"
 `memory.long_term`, агент не переносит его в профиль и удаляет из JSON при
 следующем сохранении истории.
 
+Инварианты не являются памятью диалога. Это обязательные ограничения: выбранная
+архитектура, принятые технические решения, ограничения стека или бизнес-правила.
+Они подключаются к каждому запросу отдельным system-блоком и проверяются
+отдельным внутренним агентом до запуска основного ответа. Если запрос конфликтует
+с инвариантом, ассистент отказывается от конфликтующей части, называет нарушенное
+правило и предлагает совместимую альтернативу.
+
 По умолчанию `auto memory` включен. На каждом сообщении пользователя агент
 запускает внутренний memory router и сам решает, что сохранить:
 
@@ -217,10 +235,21 @@ export CODE_AGENT_CONTEXT_STRATEGY="sliding"
 
 ```text
 system prompt
+invariants
 long-term memory
 working memory
 последние N сообщений как есть
 текущий запрос
+```
+
+Команды для инвариантов:
+
+```text
+/invariants
+/invariants add TEXT
+/invariants delete N
+/invariants clear
+/invariants path
 ```
 
 ```bash
@@ -353,6 +382,7 @@ export CODE_AGENT_MEMORY_MAX_TOKENS="1200"
 export CODE_AGENT_AUTO_MEMORY="0"
 export CODE_AGENT_CONTEXT_LIMIT="64000"
 export CODE_AGENT_PROFILE_FILE="~/.code-agent-cli/profile.md"
+export CODE_AGENT_INVARIANTS_FILE="~/.code-agent-cli/invariants.md"
 export CODE_AGENT_INPUT_PRICE_PER_1M="0.28"
 export CODE_AGENT_OUTPUT_PRICE_PER_1M="0.42"
 export CODE_AGENT_MAX_FILE_BYTES="122880"
@@ -366,8 +396,9 @@ export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
 ```
 
 `/status` также показывает токены текущей сессии: total, prompt, answer.
-Там же отображается путь к файлу истории, была ли история загружена при старте,
-текущая стратегия контекста, активная ветка, memory layers и остаток контекста модели.
+Там же отображается путь к файлам истории, профиля и инвариантов, была ли история
+загружена при старте, текущая стратегия контекста, активная ветка, memory layers,
+invariants и остаток контекста модели.
 
 ## Разработка
 
