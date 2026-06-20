@@ -9,6 +9,7 @@ from code_agent_cli.memory import (
     MemoryState,
     TaskState,
     TaskStateUpdate,
+    TaskTransitionError,
     build_memory_update_messages,
     build_task_state_update_messages,
     normalize_task_stage,
@@ -205,6 +206,43 @@ class TaskStateAgent:
     pause_commands: set[str] = field(
         default_factory=lambda: {"пауза", "pause"}
     )
+    plan_approval_markers: tuple[str, ...] = (
+        "план утверждаю",
+        "план ок",
+        "план подходит",
+        "утверждаю план",
+        "согласен с планом",
+        "согласна с планом",
+        "можно приступать",
+        "приступай",
+        "делай",
+        "начинай реализацию",
+        "approve plan",
+        "plan approved",
+        "go ahead",
+    )
+    implementation_markers: tuple[str, ...] = (
+        "реализуй",
+        "сделай реализацию",
+        "напиши код",
+        "внеси изменения",
+        "implement",
+        "write code",
+    )
+    validation_markers: tuple[str, ...] = (
+        "проверь",
+        "прогони тесты",
+        "валидация",
+        "validate",
+        "run tests",
+    )
+    completion_markers: tuple[str, ...] = (
+        "заверши",
+        "готово",
+        "done",
+        "finish",
+        "mark done",
+    )
 
     def prepare(self, task_state: TaskState, user_text: str) -> bool:
         normalized = user_text.strip().lower()
@@ -220,6 +258,11 @@ class TaskStateAgent:
             task_state.summary = normalized_text
             task_state.stage = "planning"
             task_state.expected_action = "проанализировать задачу и предложить следующий шаг"
+            return True
+        if task_state.stage == "planning" and self.is_plan_approval_intent(user_text):
+            task_state.transition_to("execution")
+            task_state.current_step = user_text.strip()
+            task_state.expected_action = "выполнить реализацию по утвержденному плану"
             return True
         return False
 
@@ -241,28 +284,42 @@ class TaskStateAgent:
         task_state: TaskState,
         user_text: str,
         answer: str,
-    ) -> None:
+    ) -> str:
         answer_lower = answer.lower()
         user_lower = user_text.lower()
 
         if any(token in answer_lower for token in ("провер", "test", "compileall", "валид")):
-            task_state.stage = "validation"
+            desired_stage = "validation"
         elif any(token in answer_lower for token in ("готово", "заверш", "done")):
-            task_state.stage = "done"
+            desired_stage = "done"
         elif any(token in answer_lower for token in ("план", "шаг", "архитектур")) and not any(
             token in answer_lower for token in ("```", "func ", "class ", "def ")
         ):
-            task_state.stage = "planning"
+            desired_stage = "planning"
         else:
-            task_state.stage = "execution"
+            desired_stage = "execution"
+
+        if (
+            task_state.stage == "planning"
+            and desired_stage == "execution"
+            and not self.is_plan_approval_intent(user_text)
+        ):
+            transition_error = (
+                "Недопустимый переход задачи: planning -> execution. "
+                "Сначала пользователь должен явно утвердить план."
+            )
+        else:
+            transition_error = self.apply_stage_transition(task_state, desired_stage)
 
         if not task_state.summary:
             task_state.summary = user_text.strip()
         if not task_state.current_step:
             task_state.current_step = user_text.strip()
 
-        if task_state.stage == "planning":
-            task_state.expected_action = "перейти к реализации следующего шага"
+        if transition_error and task_state.stage == "planning" and desired_stage == "execution":
+            task_state.expected_action = "дождаться утверждения плана пользователем"
+        elif task_state.stage == "planning":
+            task_state.expected_action = "дождаться утверждения плана пользователем"
         elif task_state.stage == "execution":
             task_state.expected_action = "продолжить реализацию или уточнить следующий рабочий шаг"
         elif task_state.stage == "validation":
@@ -273,12 +330,49 @@ class TaskStateAgent:
         if any(token in user_lower for token in self.continue_commands):
             task_state.resume()
 
+        return transition_error
+
     def set_stage(self, task_state: TaskState, stage: str) -> bool:
         normalized = normalize_task_stage(stage)
         if not normalized:
             return False
-        if normalized == "paused":
-            task_state.pause()
-        else:
-            task_state.set_stage(normalized)
+        task_state.transition_to(normalized)
         return True
+
+    def requested_stage_from_user(self, user_text: str) -> str:
+        normalized = user_text.strip().lower()
+        if self.is_plan_approval_intent(user_text):
+            return "execution"
+        if self.has_any_marker(normalized, self.validation_markers):
+            return "validation"
+        if self.has_any_marker(normalized, self.completion_markers):
+            return "done"
+        if self.has_any_marker(normalized, self.implementation_markers):
+            return "execution"
+        return ""
+
+    def is_plan_approval_intent(self, user_text: str) -> bool:
+        normalized = user_text.strip().lower()
+        return self.has_any_marker(normalized, self.plan_approval_markers)
+
+    def is_implementation_intent(self, user_text: str) -> bool:
+        normalized = user_text.strip().lower()
+        return self.has_any_marker(normalized, self.implementation_markers)
+
+    def apply_stage_transition(
+        self,
+        task_state: TaskState,
+        desired_stage: str,
+    ) -> str:
+        normalized = normalize_task_stage(desired_stage)
+        if not normalized:
+            return ""
+        try:
+            task_state.transition_to(normalized)
+            return ""
+        except TaskTransitionError as error:
+            return str(error)
+
+    @staticmethod
+    def has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+        return any(marker in text for marker in markers)

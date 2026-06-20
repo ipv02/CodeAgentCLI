@@ -387,7 +387,7 @@ def print_help() -> None:
         "Состояние задачи",
         (
             ("/task", "показать формальное состояние задачи"),
-            ("/task set stage NAME", "установить этап: planning, execution, validation, done, paused"),
+            ("/task set stage NAME", "перейти к этапу: planning, execution, validation, done, paused"),
             ("/task set step TEXT", "установить текущий шаг"),
             ("/task set expected TEXT", "установить ожидаемое действие"),
             ("/task set summary TEXT", "установить краткое описание задачи"),
@@ -522,6 +522,8 @@ def print_status(agent: CodeAgent) -> None:
         print(status_line("Ошибка memory", str(status["last_memory_error"]), WARNING))
     if status["last_invariant_error"]:
         print(status_line("Ошибка invariant", str(status["last_invariant_error"]), WARNING))
+    if status["last_task_transition_error"]:
+        print(status_line("Ошибка task transition", str(status["last_task_transition_error"]), WARNING))
 
     print()
     print(header_line("История"))
@@ -708,6 +710,8 @@ def print_context_report(agent: CodeAgent) -> None:
         print(status_line("Ошибка memory", str(report["last_memory_error"]), WARNING))
     if report["last_invariant_error"]:
         print(status_line("Ошибка invariant", str(report["last_invariant_error"]), WARNING))
+    if report["last_task_transition_error"]:
+        print(status_line("Ошибка task transition", str(report["last_task_transition_error"]), WARNING))
 
     print()
     print_task_state(agent)
@@ -780,6 +784,8 @@ def print_task_state(agent: CodeAgent) -> None:
         print(status_line("summary", task_state["summary"]))
     if task_state.get("previous_stage"):
         print(status_line("previous_stage", task_state["previous_stage"], MUTED))
+    if task_state.get("allowed_next_stages"):
+        print(status_line("allowed_next_stages", task_state["allowed_next_stages"]))
 
 
 def handle_memory_command(agent: CodeAgent, argument: str) -> None:

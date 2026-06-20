@@ -27,6 +27,7 @@ from code_agent_cli.invariants import (
 from code_agent_cli.memory import (
     MemoryState,
     ProfileStorage,
+    TaskTransitionError,
     default_profile_file,
 )
 from code_agent_cli.storage import HistoryStorage, default_history_file
@@ -162,6 +163,7 @@ class CodeAgent:
         self.last_actual_usage: dict[str, Any] = {}
         self.last_memory_error = ""
         self.last_invariant_error = ""
+        self.last_task_transition_error = ""
         self.history_storage = HistoryStorage(self.history_file)
         self.profile_storage = ProfileStorage(self.profile_file)
         self.invariant_storage = InvariantStorage(self.invariants_file)
@@ -204,8 +206,17 @@ class CodeAgent:
             self._save_answer_to_history(user_message, conflict_answer)
             return conflict_answer
 
+        task_was_empty = self.memory.task_state.is_empty
+        task_lifecycle_answer = self._update_task_state_before_request(text)
+        if task_lifecycle_answer is not None:
+            self._save_answer_to_history(user_message, task_lifecycle_answer)
+            return task_lifecycle_answer
+        lifecycle_answer = self._refuse_if_task_lifecycle_conflict(text, task_was_empty)
+        if lifecycle_answer is not None:
+            self._save_answer_to_history(user_message, lifecycle_answer)
+            return lifecycle_answer
+
         self._update_memory_if_needed(text)
-        self._update_task_state_before_request(text)
         request_messages = self._request_messages_for_user_message(user_message, text)
         self.last_token_breakdown = self.token_counter.build_breakdown(
             request_messages,
@@ -297,6 +308,7 @@ class CodeAgent:
             "auto_task_state_updates": self.auto_task_state_updates,
             "last_memory_error": self.last_memory_error,
             "last_invariant_error": self.last_invariant_error,
+            "last_task_transition_error": self.last_task_transition_error,
             "session_total_tokens": self.token_usage.total_tokens,
             "session_prompt_tokens": self.token_usage.prompt_tokens,
             "session_completion_tokens": self.token_usage.completion_tokens,
@@ -320,6 +332,7 @@ class CodeAgent:
         self.memory.long_term = self.profile_storage.load()
         self.last_memory_error = ""
         self.last_invariant_error = ""
+        self.last_task_transition_error = ""
         self.history_loaded = False
         self._save_history()
 
@@ -329,6 +342,7 @@ class CodeAgent:
         self.last_token_breakdown = None
         self.last_actual_usage = {}
         self.last_invariant_error = ""
+        self.last_task_transition_error = ""
         self.reset_history()
 
     @property
@@ -521,6 +535,55 @@ class CodeAgent:
             lines.extend(("", "Могу помочь переформулировать задачу так, чтобы сохранить эти ограничения."))
         return "\n".join(lines)
 
+    def _refuse_if_task_lifecycle_conflict(
+        self,
+        user_text: str,
+        task_was_empty: bool,
+    ) -> str | None:
+        if not self.auto_task_state_updates:
+            return None
+        task_state = self.memory.task_state
+        requested_stage = self.task_state_agent.requested_stage_from_user(user_text)
+        if not requested_stage:
+            return None
+
+        if (
+            task_state.stage == "planning"
+            and requested_stage == "execution"
+            and self.task_state_agent.is_implementation_intent(user_text)
+            and not self.task_state_agent.is_plan_approval_intent(user_text)
+        ):
+            if task_was_empty:
+                return None
+            reason = (
+                "Недопустимый переход задачи: planning -> execution. "
+                "Сначала пользователь должен явно утвердить план."
+            )
+            self.last_task_transition_error = reason
+            return self._build_task_transition_refusal(reason)
+
+        try:
+            if task_state.stage != requested_stage:
+                task_state.transition_to(requested_stage)
+            self.last_task_transition_error = ""
+            self._save_history()
+            return None
+        except TaskTransitionError as error:
+            self.last_task_transition_error = str(error)
+            return self._build_task_transition_refusal(str(error))
+
+    @staticmethod
+    def _build_task_transition_refusal(reason: str) -> str:
+        return "\n".join(
+            [
+                "Не могу перейти к этому этапу задачи: нарушается контролируемый жизненный цикл.",
+                "",
+                f"Причина: {reason}",
+                "",
+                "Сначала нужно пройти предыдущий обязательный этап и явно подтвердить его результат.",
+            ]
+        )
+
     def _update_memory_if_needed(self, user_text: str) -> None:
         if self.context_strategy not in {MEMORY_STRATEGY, BRANCHING_STRATEGY}:
             return
@@ -565,11 +628,17 @@ class CodeAgent:
             self._sync_long_term_memory()
             self.profile_storage.save(self.memory.long_term)
 
-    def _update_task_state_before_request(self, user_text: str) -> None:
+    def _update_task_state_before_request(self, user_text: str) -> str | None:
         if not self.auto_task_state_updates:
-            return
-        if self.task_state_agent.prepare(self.memory.task_state, user_text):
-            self._save_history()
+            return None
+        try:
+            if self.task_state_agent.prepare(self.memory.task_state, user_text):
+                self.last_task_transition_error = ""
+                self._save_history()
+        except TaskTransitionError as error:
+            self.last_task_transition_error = str(error)
+            return self._build_task_transition_refusal(str(error))
+        return None
 
     def _update_task_state_after_answer(self, user_text: str, answer: str) -> None:
         if not self.auto_task_state_updates:
@@ -584,13 +653,40 @@ class CodeAgent:
                 user_text,
                 answer,
             )
-            self.memory.task_state.merge_update(update)
+            if (
+                self.memory.task_state.stage == "planning"
+                and update.stage == "execution"
+                and not self.task_state_agent.is_plan_approval_intent(user_text)
+            ):
+                self.last_task_transition_error = (
+                    "Недопустимый переход задачи: planning -> execution. "
+                    "Сначала пользователь должен явно утвердить план."
+                )
+                self.memory.task_state.current_step = update.current_step or self.memory.task_state.current_step
+                self.memory.task_state.expected_action = "дождаться утверждения плана пользователем"
+                self.memory.task_state.summary = update.summary or self.memory.task_state.summary
+            else:
+                try:
+                    self.memory.task_state.merge_update(update)
+                    self.last_task_transition_error = ""
+                except TaskTransitionError as error:
+                    self.last_task_transition_error = str(error)
+                    self.memory.task_state.current_step = update.current_step or self.memory.task_state.current_step
+                    self.memory.task_state.expected_action = (
+                        "завершить текущий обязательный этап перед переходом дальше"
+                    )
+                    self.memory.task_state.summary = update.summary or self.memory.task_state.summary
             if not self.memory.task_state.current_step:
                 self.memory.task_state.current_step = user_text.strip()
             if not self.memory.task_state.summary:
                 self.memory.task_state.summary = user_text.strip()
             if not self.memory.task_state.expected_action:
-                self.task_state_agent.apply_fallback(self.memory.task_state, user_text, answer)
+                transition_error = self.task_state_agent.apply_fallback(
+                    self.memory.task_state,
+                    user_text,
+                    answer,
+                )
+                self.last_task_transition_error = transition_error
                 self._save_history()
                 return
             self.token_usage.add(usage)
@@ -599,7 +695,11 @@ class CodeAgent:
             self._update_task_state_with_heuristics(user_text, answer)
 
     def _update_task_state_with_heuristics(self, user_text: str, answer: str) -> None:
-        self.task_state_agent.apply_fallback(self.memory.task_state, user_text, answer)
+        self.last_task_transition_error = self.task_state_agent.apply_fallback(
+            self.memory.task_state,
+            user_text,
+            answer,
+        )
         self._save_history()
 
     def _ensure_active_branch(self) -> None:
@@ -699,6 +799,7 @@ class CodeAgent:
             "max_messages": self.max_history_messages,
             "last_memory_error": self.last_memory_error,
             "last_invariant_error": self.last_invariant_error,
+            "last_task_transition_error": self.last_task_transition_error,
         }
 
     def branch_report(self) -> dict[str, Any]:
@@ -807,13 +908,21 @@ class CodeAgent:
         self.invariant_storage.save(self.invariants)
 
     def task_report(self) -> dict[str, str]:
-        return self.memory.task_state.to_dict()
+        return {
+            **self.memory.task_state.to_dict(),
+            "allowed_next_stages": ", ".join(self.memory.task_state.allowed_next_stages()),
+        }
 
     def set_task_stage(self, stage: str) -> None:
-        if not self.task_state_agent.set_stage(self.memory.task_state, stage):
-            raise CodeAgentError(
-                "Этап задачи должен быть planning, execution, validation, done или paused."
-            )
+        try:
+            if not self.task_state_agent.set_stage(self.memory.task_state, stage):
+                raise CodeAgentError(
+                    "Этап задачи должен быть planning, execution, validation, done или paused."
+                )
+            self.last_task_transition_error = ""
+        except TaskTransitionError as error:
+            self.last_task_transition_error = str(error)
+            raise CodeAgentError(str(error)) from error
         self._save_history()
 
     def set_task_current_step(self, value: str) -> None:
@@ -829,15 +938,22 @@ class CodeAgent:
         self._save_history()
 
     def pause_task(self) -> None:
-        self.memory.task_state.pause()
+        try:
+            self.memory.task_state.pause()
+            self.last_task_transition_error = ""
+        except TaskTransitionError as error:
+            self.last_task_transition_error = str(error)
+            raise CodeAgentError(str(error)) from error
         self._save_history()
 
     def resume_task(self) -> None:
         self.memory.task_state.resume()
+        self.last_task_transition_error = ""
         self._save_history()
 
     def clear_task_state(self) -> None:
         self.memory.task_state.clear()
+        self.last_task_transition_error = ""
         self._save_history()
 
     @staticmethod

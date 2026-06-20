@@ -31,6 +31,20 @@ TASK_STAGES = {
     "done",
     "paused",
 }
+ALLOWED_TASK_TRANSITIONS = {
+    "planning": {"execution", "paused"},
+    "execution": {"validation", "paused"},
+    "validation": {"done", "paused"},
+    "done": {"planning"},
+    "paused": set(),
+}
+TASK_STAGE_DESCRIPTIONS = {
+    "planning": "сначала нужно сформировать и утвердить план",
+    "execution": "после утвержденного плана можно выполнять реализацию",
+    "validation": "после реализации нужно проверить результат",
+    "done": "завершение допустимо только после валидации",
+    "paused": "пауза сохраняет предыдущий этап и возобновляется через resume",
+}
 
 MEMORY_ROUTER_SYSTEM_PROMPT = """
 Ты обновляешь явную layered memory для code assistant.
@@ -52,6 +66,14 @@ TASK_STATE_UPDATE_PROMPT = """
 - done
 - paused
 
+Разрешенные переходы:
+- planning -> execution
+- execution -> validation
+- validation -> done
+- любой активный этап -> paused
+- paused -> только предыдущий этап через resume
+- done -> planning для новой задачи
+
 Поля:
 - stage: текущий этап
 - current_step: что делается прямо сейчас
@@ -61,6 +83,8 @@ TASK_STATE_UPDATE_PROMPT = """
 Правила:
 - paused используй только если пользователь явно поставил задачу на паузу.
 - done используй только если задача действительно завершена.
+- Не предлагай execution до утверждения плана пользователем.
+- Не предлагай done до validation.
 - Если агент объясняет план или подход, обычно это planning.
 - Если агент пишет, меняет или предлагает реализовать код, обычно это execution.
 - Если агент проверяет, тестирует, валидирует или просит проверить результат, обычно это validation.
@@ -190,6 +214,13 @@ class TaskStateUpdate:
     summary: str
 
 
+class TaskTransitionError(ValueError):
+    def __init__(self, current_stage: str, target_stage: str) -> None:
+        self.current_stage = current_stage
+        self.target_stage = target_stage
+        super().__init__(format_task_transition_error(current_stage, target_stage))
+
+
 @dataclass
 class TaskState:
     stage: str = "planning"
@@ -237,16 +268,31 @@ class TaskState:
         )
 
     def set_stage(self, stage: str) -> None:
+        self.transition_to(stage)
+
+    def transition_to(self, stage: str) -> bool:
         normalized = normalize_task_stage(stage)
         if not normalized:
             raise ValueError("task stage must be planning, execution, validation, done, or paused")
+        if normalized == self.stage:
+            return False
+        if normalized == "paused":
+            self.pause()
+            return True
+        if self.stage == "paused":
+            raise TaskTransitionError(self.stage, normalized)
+        if not can_transition_task_stage(self.stage, normalized):
+            raise TaskTransitionError(self.stage, normalized)
         self.stage = normalized
         if normalized != "paused":
             self.previous_stage = ""
+        return True
 
     def pause(self) -> None:
         if self.stage == "paused":
             return
+        if not can_transition_task_stage(self.stage, "paused"):
+            raise TaskTransitionError(self.stage, "paused")
         self.previous_stage = self.stage
         self.stage = "paused"
 
@@ -256,6 +302,11 @@ class TaskState:
         self.stage = self.previous_stage or "execution"
         self.previous_stage = ""
 
+    def allowed_next_stages(self) -> list[str]:
+        if self.stage == "paused":
+            return [self.previous_stage] if self.previous_stage else []
+        return sorted(ALLOWED_TASK_TRANSITIONS.get(self.stage, set()))
+
     def clear(self) -> None:
         self.stage = "planning"
         self.current_step = ""
@@ -264,7 +315,7 @@ class TaskState:
         self.previous_stage = ""
 
     def merge_update(self, update: TaskStateUpdate) -> None:
-        self.stage = update.stage
+        self.transition_to(update.stage)
         if update.current_step:
             self.current_step = update.current_step
         if update.expected_action:
@@ -309,6 +360,28 @@ def normalize_task_stage(value: Any, allow_empty: bool = False) -> str:
     if not normalized and allow_empty:
         return ""
     return normalized if normalized in TASK_STAGES else ""
+
+
+def can_transition_task_stage(current_stage: str, target_stage: str) -> bool:
+    current = normalize_task_stage(current_stage)
+    target = normalize_task_stage(target_stage)
+    if not current or not target:
+        return False
+    if current == target:
+        return True
+    return target in ALLOWED_TASK_TRANSITIONS.get(current, set())
+
+
+def format_task_transition_error(current_stage: str, target_stage: str) -> str:
+    current = normalize_task_stage(current_stage) or current_stage
+    target = normalize_task_stage(target_stage) or target_stage
+    allowed = sorted(ALLOWED_TASK_TRANSITIONS.get(current, set()))
+    allowed_text = ", ".join(allowed) if allowed else "нет прямых переходов"
+    reason = TASK_STAGE_DESCRIPTIONS.get(target, "переход нарушает жизненный цикл задачи")
+    return (
+        f"Недопустимый переход задачи: {current} -> {target}. "
+        f"Разрешено из {current}: {allowed_text}. {reason}."
+    )
 
 
 def merge_layer(target: dict[str, str], update: dict[str, str]) -> None:
@@ -365,6 +438,9 @@ def task_state_message_block(task_state: TaskState) -> dict[str, str] | None:
         lines.append(f"- summary: {task_state.summary}")
     if task_state.previous_stage:
         lines.append(f"- previous_stage: {task_state.previous_stage}")
+    allowed_next = task_state.allowed_next_stages()
+    if allowed_next:
+        lines.append(f"- allowed_next_stages: {', '.join(allowed_next)}")
     return {
         "role": "system",
         "content": "\n".join(lines),

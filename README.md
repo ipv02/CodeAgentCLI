@@ -274,6 +274,22 @@ export CODE_AGENT_CONTEXT_STRATEGY="memory"
 - `expected_action` — что ожидается дальше;
 - `summary` — краткая суть задачи.
 
+Переходы между этапами контролируются явно:
+
+```text
+planning -> execution
+execution -> validation
+validation -> done
+planning|execution|validation -> paused
+paused -> предыдущий этап через resume
+done -> planning для новой задачи
+```
+
+Агент не может перепрыгивать этапы. Например, `planning -> done` и
+`execution -> done` блокируются. Реализация начинается только после утверждения
+плана пользователем: фразы вроде `план утверждаю`, `план ок`, `приступай`
+автоматически переводят задачу из `planning` в `execution`.
+
 Task state сохраняется в `history.json` вместе с рабочей памятью и автоматически
 подключается к каждому запросу в стратегии `memory`.
 
@@ -286,6 +302,8 @@ Task state сохраняется в `history.json` вместе с рабоче
 /task
 /task set stage planning
 /task set stage execution
+/task set stage validation
+/task set stage done
 /task set step реализовать state machine
 /task set expected проверить compileall и smoke сценарий
 /task set summary задача про формализованное состояние агента
@@ -293,6 +311,9 @@ Task state сохраняется в `history.json` вместе с рабоче
 /task resume
 /task clear
 ```
+
+Ручной override тоже проходит через transition-validator. Если попробовать
+`/task set stage done` из `planning`, CLI покажет ошибку и оставит текущий этап.
 
 Пауза работает на любом этапе через `/task pause`. После `/task resume` агент
 возвращается на предыдущий рабочий этап и продолжает без повторного объяснения,
