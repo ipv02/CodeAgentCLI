@@ -33,6 +33,14 @@ SYSTEM_PROMPT = """
 Если пользователь просит исправить код, кратко объясни проблему и дай исправленный вариант.
 Если есть несколько подходов, назови лучший по умолчанию и коротко объясни trade-off.
 Если данных недостаточно и без них легко ошибиться, задай уточняющий вопрос.
+
+Учитывай Task state как обязательный жизненный цикл задачи:
+- planning: дай план и явно попроси подтвердить его фразой "План утверждаю, приступай".
+- execution: выполняй реализацию; в конце явно скажи, что следующий обязательный этап validation, и попроси "Проверь реализацию" или "Запусти валидацию".
+- validation: проверяй результат; после успешной проверки скажи, что можно написать "Заверши задачу".
+- paused: не продолжай работу, пока пользователь не попросит "Продолжай".
+- done: не выполняй старую задачу как активную; для новой задачи нужен новый planning.
+Не предлагай пользователю пропускать следующий обязательный этап.
 """.strip()
 
 
@@ -238,10 +246,25 @@ class TaskStateAgent:
     )
     completion_markers: tuple[str, ...] = (
         "заверши",
+        "заверш",
+        "закрой",
+        "закрыть",
+        "считай задачу заверш",
+        "считай заверш",
         "готово",
         "done",
         "finish",
         "mark done",
+    )
+    skip_validation_markers: tuple[str, ...] = (
+        "без валидации",
+        "валидацию не делай",
+        "не делай валидацию",
+        "валидация не нужна",
+        "не проверяй",
+        "без проверки",
+        "skip validation",
+        "without validation",
     )
 
     def prepare(self, task_state: TaskState, user_text: str) -> bool:
@@ -288,10 +311,10 @@ class TaskStateAgent:
         answer_lower = answer.lower()
         user_lower = user_text.lower()
 
-        if any(token in answer_lower for token in ("провер", "test", "compileall", "валид")):
-            desired_stage = "validation"
-        elif any(token in answer_lower for token in ("готово", "заверш", "done")):
+        if any(token in answer_lower for token in ("готово", "заверш", "закрыт", "done")):
             desired_stage = "done"
+        elif any(token in answer_lower for token in ("провер", "test", "compileall", "валид")):
+            desired_stage = "validation"
         elif any(token in answer_lower for token in ("план", "шаг", "архитектур")) and not any(
             token in answer_lower for token in ("```", "func ", "class ", "def ")
         ):
@@ -343,6 +366,8 @@ class TaskStateAgent:
         normalized = user_text.strip().lower()
         if self.is_plan_approval_intent(user_text):
             return "execution"
+        if self.is_skip_validation_completion_intent(user_text):
+            return "done"
         if self.has_any_marker(normalized, self.validation_markers):
             return "validation"
         if self.has_any_marker(normalized, self.completion_markers):
@@ -353,11 +378,26 @@ class TaskStateAgent:
 
     def is_plan_approval_intent(self, user_text: str) -> bool:
         normalized = user_text.strip().lower()
+        if any(marker in normalized for marker in ("не делай", "не приступай", "не начинай")):
+            return False
         return self.has_any_marker(normalized, self.plan_approval_markers)
 
     def is_implementation_intent(self, user_text: str) -> bool:
         normalized = user_text.strip().lower()
         return self.has_any_marker(normalized, self.implementation_markers)
+
+    def is_pause_intent(self, user_text: str) -> bool:
+        return user_text.strip().lower() in self.pause_commands
+
+    def is_continue_intent(self, user_text: str) -> bool:
+        return user_text.strip().lower() in self.continue_commands
+
+    def is_skip_validation_completion_intent(self, user_text: str) -> bool:
+        normalized = user_text.strip().lower()
+        return (
+            self.has_any_marker(normalized, self.skip_validation_markers)
+            and self.has_any_marker(normalized, self.completion_markers)
+        )
 
     def apply_stage_transition(
         self,

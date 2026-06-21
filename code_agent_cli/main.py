@@ -786,6 +786,10 @@ def print_task_state(agent: CodeAgent) -> None:
         print(status_line("previous_stage", task_state["previous_stage"], MUTED))
     if task_state.get("allowed_next_stages"):
         print(status_line("allowed_next_stages", task_state["allowed_next_stages"]))
+    if task_state.get("guidance"):
+        print(status_line("guidance", task_state["guidance"]))
+    if task_state.get("next_action"):
+        print(status_line("next_action", task_state["next_action"]))
 
 
 def handle_memory_command(agent: CodeAgent, argument: str) -> None:

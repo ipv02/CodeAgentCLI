@@ -45,6 +45,29 @@ TASK_STAGE_DESCRIPTIONS = {
     "done": "завершение допустимо только после валидации",
     "paused": "пауза сохраняет предыдущий этап и возобновляется через resume",
 }
+TASK_STAGE_GUIDANCE = {
+    "planning": (
+        "Сформируй план и явно попроси пользователя подтвердить его фразой "
+        '"План утверждаю, приступай". Не переходи к реализации до подтверждения.'
+    ),
+    "execution": (
+        "Выполняй реализацию. Когда реализация готова, явно попроси следующий "
+        'обязательный шаг: "Проверь реализацию" или "Запусти валидацию".'
+    ),
+    "validation": (
+        "Проверь результат. После успешной проверки явно сообщи, что задачу можно "
+        'закрыть фразой "Заверши задачу".'
+    ),
+    "done": "Задача закрыта. Для новой задачи нужен переход в planning.",
+    "paused": 'Задача на паузе. Для продолжения попроси пользователя написать "Продолжай".',
+}
+TASK_STAGE_NEXT_ACTION = {
+    "planning": 'Напишите: "План утверждаю, приступай".',
+    "execution": 'Напишите: "Проверь реализацию" или "Запусти валидацию".',
+    "validation": 'Напишите: "Заверши задачу".',
+    "done": "Начните новую задачу.",
+    "paused": 'Напишите: "Продолжай".',
+}
 
 MEMORY_ROUTER_SYSTEM_PROMPT = """
 Ты обновляешь явную layered memory для code assistant.
@@ -307,6 +330,12 @@ class TaskState:
             return [self.previous_stage] if self.previous_stage else []
         return sorted(ALLOWED_TASK_TRANSITIONS.get(self.stage, set()))
 
+    def guidance(self) -> str:
+        return TASK_STAGE_GUIDANCE.get(self.stage, "")
+
+    def next_action_hint(self) -> str:
+        return TASK_STAGE_NEXT_ACTION.get(self.stage, "")
+
     def clear(self) -> None:
         self.stage = "planning"
         self.current_step = ""
@@ -441,6 +470,12 @@ def task_state_message_block(task_state: TaskState) -> dict[str, str] | None:
     allowed_next = task_state.allowed_next_stages()
     if allowed_next:
         lines.append(f"- allowed_next_stages: {', '.join(allowed_next)}")
+    guidance = task_state.guidance()
+    if guidance:
+        lines.append(f"- lifecycle_guidance: {guidance}")
+    next_action = task_state.next_action_hint()
+    if next_action:
+        lines.append(f"- next_user_action_hint: {next_action}")
     return {
         "role": "system",
         "content": "\n".join(lines),

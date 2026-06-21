@@ -207,14 +207,24 @@ class CodeAgent:
             return conflict_answer
 
         task_was_empty = self.memory.task_state.is_empty
+        stage_before_request = self.memory.task_state.stage
         task_lifecycle_answer = self._update_task_state_before_request(text)
         if task_lifecycle_answer is not None:
             self._save_answer_to_history(user_message, task_lifecycle_answer)
             return task_lifecycle_answer
+        stage_changed_before_request = stage_before_request != self.memory.task_state.stage
         lifecycle_answer = self._refuse_if_task_lifecycle_conflict(text, task_was_empty)
         if lifecycle_answer is not None:
             self._save_answer_to_history(user_message, lifecycle_answer)
             return lifecycle_answer
+        stage_changed_before_request = (
+            stage_changed_before_request
+            or stage_before_request != self.memory.task_state.stage
+        )
+        if stage_changed_before_request and self.task_state_agent.is_pause_intent(text):
+            answer = self._build_task_pause_answer()
+            self._save_answer_to_history(user_message, answer)
+            return answer
 
         self._update_memory_if_needed(text)
         request_messages = self._request_messages_for_user_message(user_message, text)
@@ -229,7 +239,11 @@ class CodeAgent:
 
         self.last_actual_usage = usage
         self.token_usage.add(usage)
-        self._update_task_state_after_answer(text, answer)
+        self._update_task_state_after_answer(
+            text,
+            answer,
+            suppress_stage_advance=stage_changed_before_request,
+        )
         self.messages = [
             *self.messages,
             user_message,
@@ -560,7 +574,7 @@ class CodeAgent:
                 "Сначала пользователь должен явно утвердить план."
             )
             self.last_task_transition_error = reason
-            return self._build_task_transition_refusal(reason)
+            return self._build_task_transition_refusal(reason, task_state)
 
         try:
             if task_state.stage != requested_stage:
@@ -570,17 +584,41 @@ class CodeAgent:
             return None
         except TaskTransitionError as error:
             self.last_task_transition_error = str(error)
-            return self._build_task_transition_refusal(str(error))
+            return self._build_task_transition_refusal(str(error), task_state)
 
-    @staticmethod
-    def _build_task_transition_refusal(reason: str) -> str:
+    def _build_task_transition_refusal(
+        self,
+        reason: str,
+        task_state: Any | None = None,
+    ) -> str:
+        task_state = task_state or self.memory.task_state
+        allowed_next = ", ".join(task_state.allowed_next_stages()) or "нет прямых переходов"
+        next_action = task_state.next_action_hint() or "Продолжите с разрешенного следующего этапа."
         return "\n".join(
             [
                 "Не могу перейти к этому этапу задачи: нарушается контролируемый жизненный цикл.",
                 "",
+                f"- Текущий этап: {task_state.stage}",
+                f"- Разрешенный следующий этап: {allowed_next}",
+                "",
                 f"Причина: {reason}",
                 "",
-                "Сначала нужно пройти предыдущий обязательный этап и явно подтвердить его результат.",
+                f"Что сделать дальше: {next_action}",
+            ]
+        )
+
+    def _build_task_pause_answer(self) -> str:
+        task_state = self.memory.task_state
+        next_action = task_state.next_action_hint() or 'Напишите: "Продолжай".'
+        previous = task_state.previous_stage or "предыдущий этап"
+        return "\n".join(
+            [
+                "Задача поставлена на паузу.",
+                "",
+                f"- Текущий этап: {task_state.stage}",
+                f"- Предыдущий этап: {previous}",
+                "",
+                f"Что сделать дальше: {next_action}",
             ]
         )
 
@@ -637,13 +675,26 @@ class CodeAgent:
                 self._save_history()
         except TaskTransitionError as error:
             self.last_task_transition_error = str(error)
-            return self._build_task_transition_refusal(str(error))
+            return self._build_task_transition_refusal(str(error), self.memory.task_state)
         return None
 
-    def _update_task_state_after_answer(self, user_text: str, answer: str) -> None:
+    def _update_task_state_after_answer(
+        self,
+        user_text: str,
+        answer: str,
+        suppress_stage_advance: bool = False,
+    ) -> None:
         if not self.auto_task_state_updates:
             return
         if self.memory.task_state.stage == "paused":
+            return
+        if suppress_stage_advance:
+            if self.memory.task_state.stage == "execution":
+                self.memory.task_state.expected_action = (
+                    "продолжить реализацию или запросить валидацию отдельным сообщением"
+                )
+            self.last_task_transition_error = ""
+            self._save_history()
             return
 
         try:
@@ -911,6 +962,8 @@ class CodeAgent:
         return {
             **self.memory.task_state.to_dict(),
             "allowed_next_stages": ", ".join(self.memory.task_state.allowed_next_stages()),
+            "guidance": self.memory.task_state.guidance(),
+            "next_action": self.memory.task_state.next_action_hint(),
         }
 
     def set_task_stage(self, stage: str) -> None:
