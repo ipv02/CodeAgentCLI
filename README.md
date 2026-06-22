@@ -95,41 +95,124 @@ agent "объясни, чем struct отличается от class в Swift"
 
 ## MCP
 
-CLI умеет устанавливать минимальное MCP-соединение по stdio и выводить список
-инструментов, которые объявляет MCP-сервер.
+CLI подключается к реальным MCP stdio-серверам из постоянного config и выводит
+список инструментов, которые эти серверы объявляют.
 
-Проверка на встроенном demo MCP-сервере:
+Постоянный MCP config хранится в:
 
-```bash
-agent --mcp-demo-tools
+```text
+~/.code-agent-cli/mcp.json
 ```
 
-Подключение к внешнему MCP stdio server script:
+При старте `agent` показывает, настроен ли MCP:
 
-```bash
-agent --mcp-tools path/to/server.py
-agent --mcp-tools path/to/server.js
+```text
+Модель: deepseek-v4-flash · ... · MCP: 2 configured
 ```
 
-Ожидаемый результат:
+Добавить свой MCP-сервер один раз:
+
+```text
+agent
+/mcp add NAME -- COMMAND ARG1 ARG2
+```
+
+Примеры:
+
+```text
+/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest
+/mcp add cupertino -- cupertino serve --no-reap
+```
+
+После добавления сервер остается в config и подхватывается при следующих запусках
+`agent`.
+
+Удалить один MCP-сервер:
+
+```text
+/mcp remove NAME
+```
+
+Полностью отключить MCP:
+
+```text
+/mcp clear
+```
+
+Команды `/mcp add`, `/mcp remove` и `/mcp clear` сами обновляют JSON config.
+Пользователю не нужно вручную редактировать скобки, запятые и массивы.
+
+Проверить подключение:
+
+```text
+/mcp
+```
+
+Ожидаемый статус:
 
 ```text
 MCP:
-Connection: OK
-Available tools: 2
+Конфиг: /Users/ipv/.code-agent-cli/mcp.json
+Серверов: 2
 
-  1. echo (Echo)
-  Description: Return the provided text unchanged.
-  Input:
-    - text: string, required
+  apple-mcp  Connected  7 инструментов
+  cupertino  Connected  15 инструментов
 
-  2. current_time (Current Time)
-  Description: Return the current UTC timestamp.
-  Input: none
+Connected servers: 2 / 2
+Инструментов: 22
+```
+
+Показать полный список инструментов:
+
+```text
+/mcp tools
+```
+
+Для одноразовой проверки из shell без входа в интерактивный режим:
+
+```bash
+agent --mcp-config-tools
+```
+
+Дополнительные команды:
+
+```text
+/mcp show
+/mcp remove NAME
+/mcp clear
+/mcp path
+/mcp test
+/mcp help
+```
+
+Создать готовый config для Apple MCP и Cupertino:
+
+```bash
+agent --mcp-init-apple
 ```
 
 Реализация использует официальный Python MCP SDK: `ClientSession`,
 `StdioServerParameters`, `stdio_client`, затем `initialize()` и `list_tools()`.
+
+Config создается в формате:
+
+```json
+{
+  "mcpServers": {
+    "apple-mcp": {
+      "command": "bunx",
+      "args": ["--no-cache", "apple-mcp@latest"]
+    },
+    "cupertino": {
+      "command": "cupertino",
+      "args": ["serve", "--no-reap"]
+    }
+  }
+}
+```
+
+`apple-mcp` требует установленный Bun (`bunx`), а `cupertino` требует установленный
+Cupertino и одноразовую настройку баз документации через `cupertino setup`.
 
 ## Работа с файлами
 

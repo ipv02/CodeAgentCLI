@@ -5,6 +5,7 @@ import asyncio
 import itertools
 import os
 import re
+import shlex
 import sys
 import textwrap
 import threading
@@ -12,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 try:
     import readline  # noqa: F401
@@ -26,6 +27,18 @@ from code_agent_cli.agent import (
     ContextLimitExceededError,
     MissingAPIKeyError,
 )
+from code_agent_cli.mcp_config import (
+    MCPConfig,
+    MCPConfigError,
+    MCPServerConfig,
+    add_mcp_server,
+    clear_mcp_servers,
+    default_mcp_config_file,
+    load_mcp_config,
+    load_mcp_config_or_empty,
+    remove_mcp_server,
+    save_default_apple_mcp_config,
+)
 from code_agent_cli.mcp_client import MCPConnectionError, MCPTool, list_mcp_tools
 from code_agent_cli.tokens import TokenBreakdown
 
@@ -38,6 +51,7 @@ ACCENT = "\033[38;5;81m"
 ACCENT_SOFT = "\033[38;5;110m"
 USER_INPUT = "\033[38;5;214m"
 SUCCESS = "\033[38;5;114m"
+ERROR = "\033[38;5;203m"
 WARNING = "\033[38;5;215m"
 VALUE = "\033[38;5;159m"
 MONEY = "\033[38;5;120m"
@@ -112,18 +126,34 @@ class PromptPayload:
     history_text: str | None = None
 
 
+@dataclass(frozen=True)
+class MCPServerCheck:
+    server: MCPServerConfig
+    tools: list[MCPTool]
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     validate_args(parser, args)
 
-    if args.mcp_demo_tools:
-        if not run_mcp_demo_tools(args.mcp_timeout):
+    if args.mcp_tools is not None:
+        if not run_mcp_tools(args.mcp_tools, args.mcp_timeout):
             raise SystemExit(1)
         return
 
-    if args.mcp_tools is not None:
-        if not run_mcp_tools(args.mcp_tools, args.mcp_timeout):
+    if args.mcp_config_tools:
+        if not run_mcp_config_tools(args.mcp_config, args.mcp_timeout):
+            raise SystemExit(1)
+        return
+
+    if args.mcp_init_apple:
+        if not init_apple_mcp_config(args.mcp_config, args.mcp_force):
             raise SystemExit(1)
         return
 
@@ -177,15 +207,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Connect to an MCP stdio server script and print its tools.",
     )
     parser.add_argument(
-        "--mcp-demo-tools",
-        action="store_true",
-        help="Run the built-in demo MCP server and print its tools.",
-    )
-    parser.add_argument(
         "--mcp-timeout",
         type=float,
         default=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
         help="MCP response timeout in seconds. Defaults to 30.",
+    )
+    parser.add_argument(
+        "--mcp-config",
+        type=Path,
+        default=default_mcp_config_file(),
+        help="Path to MCP config. Defaults to ~/.code-agent-cli/mcp.json.",
+    )
+    parser.add_argument(
+        "--mcp-config-tools",
+        action="store_true",
+        help="Connect to all MCP servers from config and print their tools.",
+    )
+    parser.add_argument(
+        "--mcp-init-apple",
+        action="store_true",
+        help="Create MCP config with apple-mcp and cupertino servers.",
+    )
+    parser.add_argument(
+        "--mcp-force",
+        action="store_true",
+        help="Overwrite existing MCP config when used with --mcp-init-apple.",
     )
     return parser
 
@@ -203,18 +249,30 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if args.mcp_timeout <= 0:
         parser.error("--mcp-timeout должен быть положительным числом.")
 
-    mcp_mode_enabled = args.mcp_tools is not None or args.mcp_demo_tools
+    mcp_mode_enabled = (
+        args.mcp_tools is not None
+        or args.mcp_config_tools
+        or args.mcp_init_apple
+    )
     if not mcp_mode_enabled:
         return
 
-    if args.mcp_tools is not None and args.mcp_demo_tools:
-        parser.error("--mcp-tools и --mcp-demo-tools нельзя использовать одновременно.")
+    modes = [
+        args.mcp_tools is not None,
+        args.mcp_config_tools,
+        args.mcp_init_apple,
+    ]
+    if sum(1 for enabled in modes if enabled) > 1:
+        parser.error("MCP-режимы нельзя использовать одновременно.")
 
     if args.prompt:
         parser.error("MCP-режим нельзя совмещать с prompt.")
 
     if args.file is not None or args.line_range or args.force_file:
         parser.error("MCP-режим нельзя совмещать с --file, --range или --force-file.")
+
+    if args.mcp_force and not args.mcp_init_apple:
+        parser.error("--mcp-force можно использовать только вместе с --mcp-init-apple.")
 
     if args.mcp_tools is not None:
         server_path = args.mcp_tools
@@ -224,15 +282,38 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("MCP server script должен быть .py или .js.")
 
 
-def run_mcp_demo_tools(timeout: float) -> bool:
-    command = sys.executable
-    args = ["-m", "code_agent_cli.mcp_demo_server"]
-    return run_mcp_tools_command(command, args, timeout)
-
-
 def run_mcp_tools(server_path: Path, timeout: float) -> bool:
     command, args = build_mcp_server_command(server_path)
     return run_mcp_tools_command(command, args, timeout)
+
+
+def run_mcp_config_tools(config_path: Path, timeout: float) -> bool:
+    try:
+        config = load_mcp_config(config_path)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return False
+
+    return print_mcp_config_tools(config, timeout)
+
+
+def init_apple_mcp_config(config_path: Path, force: bool) -> bool:
+    try:
+        saved_path = save_default_apple_mcp_config(config_path, overwrite=force)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return False
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return False
+
+    print(header_line("MCP"))
+    print(status_line("Конфиг создан", str(saved_path), SUCCESS))
+    print()
+    print(indented_line("Серверы:"))
+    print(indented_line("- apple-mcp: bunx --no-cache apple-mcp@latest", level=2))
+    print(indented_line("- cupertino: cupertino serve --no-reap", level=2))
+    return True
 
 
 def run_mcp_tools_command(command: str, args: list[str], timeout: float) -> bool:
@@ -252,6 +333,261 @@ def run_mcp_tools_command(command: str, args: list[str], timeout: float) -> bool
     return True
 
 
+def print_mcp_config_tools(config: MCPConfig, timeout: float) -> bool:
+    print(header_line("MCP"))
+    print(status_line("Конфиг", str(config.path), VALUE))
+    print(status_line("Серверов", str(len(config.servers)), VALUE))
+
+    if not config.servers:
+        return True
+
+    checks = check_mcp_config_servers(config, timeout)
+    print()
+
+    for index, check in enumerate(checks, start=1):
+        print_mcp_server_tools(check)
+        if index < len(config.servers):
+            print()
+
+    success_count = sum(1 for check in checks if check.ok)
+    total_tools = sum(len(check.tools) for check in checks)
+    print()
+    print(status_line("Connected servers", f"{success_count} / {len(config.servers)}", SUCCESS if success_count == len(config.servers) else ERROR))
+    print(status_line("Инструментов", str(total_tools), VALUE))
+    return success_count == len(config.servers)
+
+
+def print_mcp_config_missing(config_path: Path, error: MCPConfigError | None = None) -> None:
+    print(header_line("MCP"))
+    print(status_line("Конфиг", str(config_path), VALUE))
+    if error is None:
+        print(status_line("Статус", "серверы еще не настроены", WARNING))
+    else:
+        print(status_line("Статус", str(error), WARNING))
+    print()
+    print(indented_line("Добавить MCP-сервер:"))
+    print(indented_line("/mcp add NAME -- COMMAND ARG1 ARG2", level=2))
+    print()
+    print(indented_line("Примеры:"))
+    print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
+    print(indented_line("/mcp add cupertino -- cupertino serve --no-reap", level=2))
+    print()
+    print(indented_line("После добавления проверьте подключение:"))
+    print(indented_line("/mcp", level=2))
+
+
+def print_mcp_config_servers(config: MCPConfig) -> None:
+    print(header_line("MCP"))
+    print(status_line("Конфиг", str(config.path), VALUE))
+    print(status_line("Серверов", str(len(config.servers)), VALUE))
+    if not config.servers:
+        print()
+        print(indented_line("Серверы еще не настроены."))
+        print(indented_line("/mcp add NAME -- COMMAND ARG1 ARG2", level=2))
+        return
+
+    print()
+    for server in config.servers:
+        print(command_line(server.name))
+        print(indented_line(shlex.join([server.command, *server.args])))
+        if server.cwd is not None:
+            print(indented_line(f"cwd: {server.cwd}"))
+        if server.env:
+            print(indented_line(f"env: {len(server.env)} переменных"))
+
+
+def print_mcp_help() -> None:
+    print_command_help_section(
+        "MCP",
+        (
+            ("/mcp", "проверить подключение серверов из config"),
+            ("/mcp tools", "показать инструменты серверов"),
+            ("/mcp show", "показать сохраненные серверы"),
+            ("/mcp add NAME -- COMMAND ARGS", "добавить или подключить свой MCP-сервер"),
+            ("/mcp remove NAME", "удалить MCP-сервер из config"),
+            ("/mcp clear", "удалить все MCP-серверы из config"),
+            ("/mcp path", "показать путь к config"),
+            ("/mcp test", "проверить подключение с диагностикой ошибок"),
+            ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
+            ("/mcp help", "показать помощь по MCP"),
+            ("agent --mcp-config-tools", "проверить MCP config из shell"),
+        ),
+    )
+    print()
+    print(indented_line("Примеры:"))
+    print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
+    print(indented_line("/mcp add cupertino -- cupertino serve --no-reap", level=2))
+
+
+def add_mcp_server_from_command(config_path: Path, argument: str) -> None:
+    try:
+        parts = shlex.split(argument)
+    except ValueError as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return
+
+    if len(parts) < 4 or parts[0] != "add" or parts[2] != "--":
+        print("Использование: /mcp add NAME -- COMMAND ARG1 ARG2")
+        return
+
+    name = parts[1]
+    command = parts[3]
+    args = parts[4:]
+    server = MCPServerConfig(name=name, command=command, args=args)
+
+    try:
+        saved_path = add_mcp_server(config_path, server)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        print("Для замены удалите старый сервер: /mcp remove NAME")
+        return
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("Сервер добавлен", name, SUCCESS))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Проверить подключение:"))
+    print(indented_line("/mcp", level=2))
+
+
+def remove_mcp_server_from_command(config_path: Path, argument: str) -> None:
+    try:
+        parts = shlex.split(argument)
+    except ValueError as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return
+
+    if len(parts) != 2 or parts[0] != "remove":
+        print("Использование: /mcp remove NAME")
+        return
+
+    name = parts[1]
+    try:
+        saved_path = remove_mcp_server(config_path, name)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("Сервер удален", name, WARNING))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+
+
+def clear_mcp_servers_from_command(config_path: Path) -> None:
+    try:
+        saved_path = clear_mcp_servers(config_path)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("MCP", "не настроен", WARNING))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Все MCP-серверы удалены из config."))
+
+
+def print_mcp_config_status(
+    config: MCPConfig,
+    timeout: float,
+    *,
+    show_errors: bool = False,
+    show_hints: bool = False,
+) -> bool:
+    print(header_line("MCP"))
+    print(status_line("Конфиг", str(config.path), VALUE))
+    print(status_line("Серверов", str(len(config.servers)), VALUE))
+
+    if not config.servers:
+        print(status_line("Статус", "серверы не настроены", WARNING))
+        return True
+
+    checks = check_mcp_config_servers(config, timeout)
+    name_width = max(len(check.server.name) for check in checks)
+    success_count = sum(1 for check in checks if check.ok)
+    total_tools = sum(len(check.tools) for check in checks)
+
+    print()
+    for check in checks:
+        state = mcp_connection_label(check.ok)
+        tool_count = len(check.tools) if check.ok else 0
+        print(indented_line(f"{check.server.name.ljust(name_width)}  {state}  {tool_count} инструментов"))
+        if show_errors and check.error:
+            print(indented_line(f"Ошибка: {check.error}", level=2))
+            if show_hints:
+                print_mcp_server_install_hint(check.server, level=2)
+
+    print()
+    color = SUCCESS if success_count == len(config.servers) else ERROR
+    print(status_line("Connected servers", f"{success_count} / {len(config.servers)}", color))
+    print(status_line("Инструментов", str(total_tools), VALUE))
+    return success_count == len(config.servers)
+
+
+def check_mcp_config_servers(config: MCPConfig, timeout: float) -> list[MCPServerCheck]:
+    return [check_mcp_server(server, timeout) for server in config.servers]
+
+
+def check_mcp_server(server: MCPServerConfig, timeout: float) -> MCPServerCheck:
+    try:
+        tools = asyncio.run(
+            list_mcp_tools(
+                server.command,
+                server.args,
+                cwd=server.cwd,
+                env=server.env,
+                timeout=timeout,
+            )
+        )
+    except FileNotFoundError:
+        return MCPServerCheck(server=server, tools=[], error=f"command not found: {server.command}")
+    except MCPConnectionError as error:
+        return MCPServerCheck(server=server, tools=[], error=str(error))
+    except Exception as error:
+        return MCPServerCheck(server=server, tools=[], error=str(error))
+
+    return MCPServerCheck(server=server, tools=tools)
+
+
+def mcp_connection_label(connected: bool) -> str:
+    text = "Connected" if connected else "Not Connected"
+    color = SUCCESS if connected else ERROR
+    return colorize(text, color)
+
+
+def print_mcp_server_tools(check: MCPServerCheck) -> None:
+    print(command_line(f"{check.server.name}:"))
+    if check.error:
+        print(indented_line(f"Соединение: {mcp_connection_label(False)} - {check.error}"))
+        print_mcp_server_install_hint(check.server)
+        return
+
+    print(indented_line(f"Соединение: {mcp_connection_label(True)}"))
+    print(indented_line(f"Инструментов: {len(check.tools)}"))
+    for tool in check.tools:
+        title = f" ({tool.title})" if tool.title else ""
+        print(indented_line(f"- {tool.name}{title}", level=2))
+
+
+def print_mcp_server_install_hint(server: MCPServerConfig, *, level: int = 1) -> None:
+    if server.name == "apple-mcp":
+        print(indented_line("Подсказка: установите Bun и повторите проверку.", level=level))
+        print(indented_line("Команда: curl -fsSL https://bun.sh/install | bash", level=level + 1))
+    elif server.name == "cupertino":
+        print(indented_line("Подсказка: установите Cupertino и один раз выполните setup.", level=level))
+        print(indented_line("Команда: bash <(curl -sSL https://raw.githubusercontent.com/mihaelamj/cupertino/main/install.sh)", level=level + 1))
+        print(indented_line("Затем: cupertino setup", level=level + 1))
+
+
 def build_mcp_server_command(server_path: Path) -> tuple[str, list[str]]:
     normalized_path = str(server_path)
     suffix = server_path.suffix.lower()
@@ -264,8 +600,8 @@ def build_mcp_server_command(server_path: Path) -> tuple[str, list[str]]:
 
 def print_mcp_tools(tools: list[MCPTool]) -> None:
     print(header_line("MCP"))
-    print(status_line("Connection", "OK", SUCCESS))
-    print(status_line("Available tools", str(len(tools)), VALUE))
+    print(status_line("Соединение", "Connected", SUCCESS))
+    print(status_line("Инструментов", str(len(tools)), VALUE))
 
     if not tools:
         return
@@ -275,7 +611,7 @@ def print_mcp_tools(tools: list[MCPTool]) -> None:
         title = f" ({tool.title})" if tool.title else ""
         print(command_line(f"{index}. {tool.name}{title}"))
         if tool.description:
-            print(indented_line(f"Description: {tool.description}"))
+            print(indented_line(f"Описание: {tool.description}"))
         print_mcp_tool_input(tool.input_schema)
         if index < len(tools):
             print()
@@ -284,10 +620,10 @@ def print_mcp_tools(tools: list[MCPTool]) -> None:
 def print_mcp_tool_input(schema: dict[str, Any]) -> None:
     parameters = readable_schema_parameters(schema)
     if not parameters:
-        print(indented_line("Input: none"))
+        print(indented_line("Вход: нет параметров"))
         return
 
-    print(indented_line("Input:"))
+    print(indented_line("Вход:"))
     for parameter in parameters:
         print(indented_line(f"- {parameter}", level=2))
 
@@ -342,8 +678,7 @@ def indented_line(text: str, level: int = 1) -> str:
 
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
-    print(colorize("Команды: /help, /status, /tokens, /context, /task, /memory, /profile, /invariants, /branch, /reset, /exit", MUTED))
-    print(colorize(session_summary(agent), MUTED))
+    print_startup_summary(agent)
 
     while True:
         try:
@@ -407,6 +742,10 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command == "/branch":
             handle_branch_command(agent, argument)
+            continue
+
+        if command == "/mcp":
+            handle_mcp_command(argument)
             continue
 
         send(agent, text)
@@ -523,7 +862,6 @@ def print_help() -> None:
             'agent "объясни, чем struct отличается от class в Swift"',
             'agent --file Sources/App.swift "найди ошибки"',
             'agent --file Sources/App.swift --range 40:120 "проверь этот участок"',
-            "agent --mcp-demo-tools",
             "agent --mcp-tools path/to/server.py",
         ),
     )
@@ -610,12 +948,20 @@ def print_help() -> None:
         )
     )
     print()
-    print_section(
+    print_command_help_section(
         "MCP",
         (
-            "agent --mcp-demo-tools",
-            "agent --mcp-tools path/to/server.py",
-            "agent --mcp-tools path/to/server.js",
+            ("/mcp", "проверить подключение MCP-серверов из config"),
+            ("/mcp add NAME -- COMMAND ARGS", "добавить свой MCP-сервер"),
+            ("/mcp remove NAME", "удалить MCP-сервер из config"),
+            ("/mcp clear", "удалить все MCP-серверы из config"),
+            ("/mcp show", "показать сохраненные MCP-серверы"),
+            ("/mcp tools", "показать инструменты MCP-серверов"),
+            ("/mcp test", "проверить MCP-серверы с диагностикой ошибок"),
+            ("/mcp path", "показать путь к MCP config"),
+            ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
+            ("/mcp help", "показать помощь по MCP"),
+            ("agent --mcp-config-tools", "проверить MCP config из shell"),
         ),
     )
 
@@ -737,16 +1083,30 @@ def status_line(label: str, value: str, value_color: str = VALUE) -> str:
     return f"{MUTED}{label}{SUBTLE}:{RESET} {value_color}{value}{RESET}"
 
 
-def session_summary(agent: CodeAgent) -> str:
+def print_startup_summary(agent: CodeAgent) -> None:
     status = agent.status()
-    return (
-        f"Модель: {status['model']} · "
-        f"Стратегия: {status['context_strategy']} · "
-        f"Ветка: {status['active_branch']} · "
-        f"История: {status['history_messages']}/{status['max_history_messages']} · "
-        f"Контекст: {status['current_history_tokens']}/{status['context_limit']} токенов · "
-        f"{'загружена' if status['history_loaded'] else 'новая'}"
-    )
+    history_state = "загружена" if status["history_loaded"] else "новая"
+
+    print(status_line("Модель", str(status["model"])))
+    print(status_line("Стратегия", str(status["context_strategy"])))
+    print(status_line("Ветка", str(status["active_branch"])))
+    print(status_line("История", f"{status['history_messages']}/{status['max_history_messages']} · {history_state}"))
+    print(status_line("Контекст", f"{status['current_history_tokens']}/{status['context_limit']} токенов"))
+    print(status_line("MCP", mcp_startup_status()))
+    print(colorize("Введите /help для списка команд.", MUTED))
+
+
+def mcp_startup_status() -> str:
+    try:
+        config = load_mcp_config(default_mcp_config_file())
+    except MCPConfigError:
+        config_path = default_mcp_config_file()
+        if config_path.exists():
+            return "ошибка config"
+        return "не настроен"
+    if not config.servers:
+        return "не настроен"
+    return f"настроено серверов: {len(config.servers)}"
 
 
 def print_current_token_state(agent: CodeAgent, request_text: str | None = None) -> None:
@@ -1185,6 +1545,79 @@ def handle_branch_command(agent: CodeAgent, argument: str) -> None:
         "Использование: /branch list | /branch compare A B | /branch checkpoint NAME | "
         "/branch create NAME [CHECKPOINT] | /branch switch NAME | /branch delete NAME"
     )
+
+
+def handle_mcp_command(argument: str) -> None:
+    command = argument.strip().lower()
+    config_path = default_mcp_config_file()
+
+    if command in {"help", "--help", "-h"}:
+        print_mcp_help()
+        return
+
+    if command.startswith("add "):
+        add_mcp_server_from_command(config_path, argument.strip())
+        return
+
+    if command.startswith("remove "):
+        remove_mcp_server_from_command(config_path, argument.strip())
+        return
+
+    if command in {"clear", "disable", "off"}:
+        clear_mcp_servers_from_command(config_path)
+        return
+
+    if command in {"show", "config", "list-servers"}:
+        try:
+            config = load_mcp_config_or_empty(config_path)
+        except MCPConfigError as error:
+            print_mcp_config_missing(config_path, error if config_path.exists() else None)
+            return
+        print_mcp_config_servers(config)
+        return
+
+    if command in {"", "status"}:
+        try:
+            config = load_mcp_config(config_path)
+        except MCPConfigError as error:
+            print_mcp_config_missing(config_path, error if config_path.exists() else None)
+            return
+        print_mcp_config_status(config, env_float("CODE_AGENT_MCP_TIMEOUT", 30.0))
+        return
+
+    if command in {"tools", "list"}:
+        try:
+            config = load_mcp_config(config_path)
+        except MCPConfigError as error:
+            print_mcp_config_missing(config_path, error if config_path.exists() else None)
+            return
+        print_mcp_config_tools(config, env_float("CODE_AGENT_MCP_TIMEOUT", 30.0))
+        return
+
+    if command in {"test", "check"}:
+        try:
+            config = load_mcp_config(config_path)
+        except MCPConfigError as error:
+            print_mcp_config_missing(config_path, error if config_path.exists() else None)
+            return
+        print_mcp_config_status(
+            config,
+            env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+            show_errors=True,
+            show_hints=True,
+        )
+        return
+
+    if command == "path":
+        print(header_line("MCP"))
+        print(status_line("Конфиг", str(config_path), VALUE))
+        return
+
+    if command in {"init-apple", "init-apple force"}:
+        init_apple_mcp_config(config_path, force=command.endswith(" force"))
+        return
+
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

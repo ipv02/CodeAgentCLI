@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -33,15 +34,19 @@ async def list_mcp_tools(
     """Connect to an MCP server over stdio and return its advertised tools."""
 
     try:
+        process_env = {**os.environ, **env} if env else None
         server_params = StdioServerParameters(
             command=command,
             args=args,
             cwd=str(cwd) if cwd else None,
-            env=env,
+            env=process_env,
         )
 
         async with AsyncExitStack() as exit_stack:
-            transport = await exit_stack.enter_async_context(stdio_client(server_params))
+            errlog = exit_stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
+            transport = await exit_stack.enter_async_context(
+                stdio_client(server_params, errlog=errlog)
+            )
             read_stream, write_stream = transport
             session = await exit_stack.enter_async_context(
                 ClientSession(
@@ -54,7 +59,19 @@ async def list_mcp_tools(
             result = await session.list_tools()
             return [_parse_tool(tool) for tool in result.tools]
     except Exception as error:
-        raise MCPConnectionError(str(error)) from error
+        raise MCPConnectionError(format_connection_error(error)) from error
+
+
+def format_connection_error(error: BaseException) -> str:
+    if isinstance(error, ExceptionGroup):
+        messages = [format_connection_error(child) for child in error.exceptions]
+        return "; ".join(message for message in messages if message) or str(error)
+
+    message = str(error).strip()
+    if message:
+        return message
+
+    return error.__class__.__name__
 
 
 def _parse_tool(raw_tool: Any) -> MCPTool:
