@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import itertools
 import os
 import re
@@ -25,6 +26,7 @@ from code_agent_cli.agent import (
     ContextLimitExceededError,
     MissingAPIKeyError,
 )
+from code_agent_cli.mcp_client import MCPConnectionError, MCPTool, list_mcp_tools
 from code_agent_cli.tokens import TokenBreakdown
 
 
@@ -115,6 +117,16 @@ def main() -> None:
     args = parser.parse_args()
     validate_args(parser, args)
 
+    if args.mcp_demo_tools:
+        if not run_mcp_demo_tools(args.mcp_timeout):
+            raise SystemExit(1)
+        return
+
+    if args.mcp_tools is not None:
+        if not run_mcp_tools(args.mcp_tools, args.mcp_timeout):
+            raise SystemExit(1)
+        return
+
     agent = CodeAgent()
 
     if args.prompt:
@@ -158,6 +170,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send a large attached file without asking for confirmation.",
     )
+    parser.add_argument(
+        "--mcp-tools",
+        type=Path,
+        metavar="SERVER",
+        help="Connect to an MCP stdio server script and print its tools.",
+    )
+    parser.add_argument(
+        "--mcp-demo-tools",
+        action="store_true",
+        help="Run the built-in demo MCP server and print its tools.",
+    )
+    parser.add_argument(
+        "--mcp-timeout",
+        type=float,
+        default=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+        help="MCP response timeout in seconds. Defaults to 30.",
+    )
     return parser
 
 
@@ -170,6 +199,145 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
     if args.max_file_bytes < 1:
         parser.error("--max-file-bytes должен быть положительным числом.")
+
+    if args.mcp_timeout <= 0:
+        parser.error("--mcp-timeout должен быть положительным числом.")
+
+    mcp_mode_enabled = args.mcp_tools is not None or args.mcp_demo_tools
+    if not mcp_mode_enabled:
+        return
+
+    if args.mcp_tools is not None and args.mcp_demo_tools:
+        parser.error("--mcp-tools и --mcp-demo-tools нельзя использовать одновременно.")
+
+    if args.prompt:
+        parser.error("MCP-режим нельзя совмещать с prompt.")
+
+    if args.file is not None or args.line_range or args.force_file:
+        parser.error("MCP-режим нельзя совмещать с --file, --range или --force-file.")
+
+    if args.mcp_tools is not None:
+        server_path = args.mcp_tools
+        if not server_path.exists():
+            parser.error(f"MCP server script не найден: {server_path}")
+        if server_path.suffix.lower() not in {".py", ".js"}:
+            parser.error("MCP server script должен быть .py или .js.")
+
+
+def run_mcp_demo_tools(timeout: float) -> bool:
+    command = sys.executable
+    args = ["-m", "code_agent_cli.mcp_demo_server"]
+    return run_mcp_tools_command(command, args, timeout)
+
+
+def run_mcp_tools(server_path: Path, timeout: float) -> bool:
+    command, args = build_mcp_server_command(server_path)
+    return run_mcp_tools_command(command, args, timeout)
+
+
+def run_mcp_tools_command(command: str, args: list[str], timeout: float) -> bool:
+    try:
+        tools = asyncio.run(list_mcp_tools(command, args, timeout=timeout))
+    except FileNotFoundError as error:
+        print(f"Ошибка: команда MCP-сервера не найдена: {error.filename}", file=sys.stderr)
+        return False
+    except MCPConnectionError as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return False
+    except Exception as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return False
+
+    print_mcp_tools(tools)
+    return True
+
+
+def build_mcp_server_command(server_path: Path) -> tuple[str, list[str]]:
+    normalized_path = str(server_path)
+    suffix = server_path.suffix.lower()
+    if suffix == ".py":
+        return sys.executable, [normalized_path]
+    if suffix == ".js":
+        return "node", [normalized_path]
+    raise ValueError("MCP server script должен быть .py или .js.")
+
+
+def print_mcp_tools(tools: list[MCPTool]) -> None:
+    print(header_line("MCP"))
+    print(status_line("Connection", "OK", SUCCESS))
+    print(status_line("Available tools", str(len(tools)), VALUE))
+
+    if not tools:
+        return
+
+    print()
+    for index, tool in enumerate(tools, start=1):
+        title = f" ({tool.title})" if tool.title else ""
+        print(command_line(f"{index}. {tool.name}{title}"))
+        if tool.description:
+            print(indented_line(f"Description: {tool.description}"))
+        print_mcp_tool_input(tool.input_schema)
+        if index < len(tools):
+            print()
+
+
+def print_mcp_tool_input(schema: dict[str, Any]) -> None:
+    parameters = readable_schema_parameters(schema)
+    if not parameters:
+        print(indented_line("Input: none"))
+        return
+
+    print(indented_line("Input:"))
+    for parameter in parameters:
+        print(indented_line(f"- {parameter}", level=2))
+
+
+def readable_schema_parameters(schema: dict[str, Any]) -> list[str]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return []
+
+    required_values = schema.get("required", [])
+    required = set(required_values if isinstance(required_values, list) else [])
+    parameters: list[str] = []
+
+    for name, raw_definition in properties.items():
+        if not isinstance(name, str):
+            continue
+        definition = raw_definition if isinstance(raw_definition, dict) else {}
+        type_label = schema_type_label(definition)
+        required_label = "required" if name in required else "optional"
+        description = definition.get("description")
+        line = f"{name}: {type_label}, {required_label}"
+        if isinstance(description, str) and description:
+            line = f"{line} - {description}"
+        parameters.append(line)
+
+    return parameters
+
+
+def schema_type_label(definition: dict[str, Any]) -> str:
+    value = definition.get("type")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " | ".join(str(item) for item in value)
+    if "anyOf" in definition:
+        return " | ".join(
+            schema_type_label(item)
+            for item in definition["anyOf"]
+            if isinstance(item, dict)
+        ) or "any"
+    if "enum" in definition:
+        return "enum"
+    return "any"
+
+
+def indented_line(text: str, level: int = 1) -> str:
+    line = f"{'  ' * level}{text}"
+    if not use_color():
+        return line
+    return f"{MUTED}{line}{RESET}"
 
 
 def run_interactive_session(agent: CodeAgent) -> None:
@@ -355,6 +523,8 @@ def print_help() -> None:
             'agent "объясни, чем struct отличается от class в Swift"',
             'agent --file Sources/App.swift "найди ошибки"',
             'agent --file Sources/App.swift --range 40:120 "проверь этот участок"',
+            "agent --mcp-demo-tools",
+            "agent --mcp-tools path/to/server.py",
         ),
     )
     print()
@@ -438,6 +608,15 @@ def print_help() -> None:
             ("/branch create NAME [CHECKPOINT]", "создать ветку"),
             ("/branch switch NAME", "переключиться на ветку"),
         )
+    )
+    print()
+    print_section(
+        "MCP",
+        (
+            "agent --mcp-demo-tools",
+            "agent --mcp-tools path/to/server.py",
+            "agent --mcp-tools path/to/server.js",
+        ),
     )
 
 
@@ -1529,6 +1708,17 @@ def env_int(name: str, default: int) -> int:
 
     try:
         return int(value)
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if not value:
+        return default
+
+    try:
+        return float(value)
     except ValueError:
         return default
 

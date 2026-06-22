@@ -4,7 +4,7 @@ Python CLI-ассистент для работы с кодом в термин�
 
 ## Требования
 
-- Python 3.9+
+- Python 3.14+
 - Git
 - API-ключ DeepSeek
 
@@ -14,7 +14,7 @@ Python CLI-ассистент для работы с кодом в термин�
 git clone git@github.com:ipv02/CodeAgentCLI.git
 cd CodeAgentCLI
 
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip setuptools wheel
@@ -92,6 +92,44 @@ agent
 ```bash
 agent "объясни, чем struct отличается от class в Swift"
 ```
+
+## MCP
+
+CLI умеет устанавливать минимальное MCP-соединение по stdio и выводить список
+инструментов, которые объявляет MCP-сервер.
+
+Проверка на встроенном demo MCP-сервере:
+
+```bash
+agent --mcp-demo-tools
+```
+
+Подключение к внешнему MCP stdio server script:
+
+```bash
+agent --mcp-tools path/to/server.py
+agent --mcp-tools path/to/server.js
+```
+
+Ожидаемый результат:
+
+```text
+MCP:
+Connection: OK
+Available tools: 2
+
+  1. echo (Echo)
+  Description: Return the provided text unchanged.
+  Input:
+    - text: string, required
+
+  2. current_time (Current Time)
+  Description: Return the current UTC timestamp.
+  Input: none
+```
+
+Реализация использует официальный Python MCP SDK: `ClientSession`,
+`StdioServerParameters`, `stdio_client`, затем `initialize()` и `list_tools()`.
 
 ## Работа с файлами
 

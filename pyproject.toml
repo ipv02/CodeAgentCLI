@@ -3,8 +3,9 @@ name = "code-agent-cli"
 version = "0.1.0"
 description = "Standalone terminal coding assistant based on the LLMRequest agent prompt."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 dependencies = [
+    "mcp>=1.27,<2",
 ]
 
 [project.scripts]
