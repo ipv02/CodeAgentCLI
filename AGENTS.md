@@ -1,59 +1,34 @@
 # AGENTS.md
 
-## Project Overview
+## Project Context
 
-CodeAgentCLI is a Python terminal coding assistant.
+CodeAgentCLI is a Python 3.14+ terminal coding assistant.
 
-It provides:
-- an interactive CLI entrypoint via `agent`;
-- one-shot prompt execution;
-- local conversation history, profile memory and invariants;
-- DeepSeek chat completions integration;
-- MCP stdio server configuration and tool discovery;
-- token accounting and context-window safeguards;
-- lightweight subagent logic for response generation, memory updates and task state.
+It includes:
+- CLI interaction and one-shot prompt execution;
+- DeepSeek-compatible chat completions;
+- local history, profile memory and invariants;
+- MCP stdio server configuration and tool listing;
+- token counting and context-limit checks;
+- internal subagent prompts for response, memory and task state.
 
-This is production-oriented CLI software, not demo code. Prefer small, safe changes that preserve existing behavior.
+Prefer minimal, backward-compatible changes. This project is a real CLI tool, not a demo.
 
-## Architecture
+## Architecture Boundaries
 
-Main modules:
+The project is a small Python package under `code_agent_cli/`.
 
-- `code_agent_cli/main.py`
-  CLI parsing, interactive session, terminal formatting, user-facing commands.
+Main responsibility areas:
+- CLI parsing, interactive commands and terminal output;
+- core agent orchestration and API calls;
+- context construction, token counting and context-limit checks;
+- local history, profile memory, task state and invariants;
+- MCP config loading, validation and stdio client integration;
+- internal subagent prompts and state-update logic.
 
-- `code_agent_cli/agent.py`
-  Core `CodeAgent` orchestration, API requests, memory/task/invariant checks, token accounting.
+Keep these boundaries intact unless the task explicitly requires architectural changes. Before editing, inspect the relevant files instead of relying only on this guide.
 
-- `code_agent_cli/context.py`
-  Conversation context construction, branching/checkpoint behavior, trimming strategy.
-
-- `code_agent_cli/memory.py`
-  Profile memory and task state persistence.
-
-- `code_agent_cli/invariants.py`
-  Persistent user invariants and conflict detection.
-
-- `code_agent_cli/mcp_config.py`
-  MCP configuration loading, validation and persistence.
-
-- `code_agent_cli/mcp_client.py`
-  MCP stdio client integration.
-
-- `code_agent_cli/subagents.py`
-  Prompting and internal agent roles.
-
-- `code_agent_cli/storage.py`
-  History persistence.
-
-- `code_agent_cli/tokens.py`
-  Token counting, pricing and context checks.
-
-Keep responsibilities separated. Do not move CLI concerns into `agent.py`, and do not put core orchestration logic into terminal/UI helpers.
-
-## Development Commands
-
-Use Python 3.14+.
+## Setup
 
 ```bash
 python3.14 -m venv .venv
@@ -71,96 +46,50 @@ agent
 Run a one-shot prompt:
 
 ```bash
-agent "explain this project architecture"
+agent "explain this project"
 ```
 
-Inspect MCP config tools:
+Check MCP config tools:
 
 ```bash
 agent --mcp-config-tools
 ```
 
-There is currently no formal test suite in the project. When adding meaningful behavior, prefer adding tests before broad refactors.
+## Development Guidelines
 
-## Coding Guidelines
-
-- Use modern Python 3.14 syntax where it improves clarity.
-- Keep type hints explicit for public functions, dataclasses and core logic.
+- Use modern Python with explicit type hints.
 - Prefer `pathlib.Path` for filesystem paths.
-- Prefer dataclasses for structured internal state.
-- Keep error classes specific and user-facing errors readable.
-- Avoid broad `except Exception` unless converting to a clear domain error.
-- Do not silently ignore persistence, API or MCP failures unless the existing UX explicitly treats them as non-fatal.
-- Keep comments rare and useful. Explain non-obvious control flow, not obvious assignments.
+- Prefer dataclasses for structured state.
+- Keep terminal formatting and user-facing command handling separate from core agent orchestration.
+- Keep API, memory, token and invariant behavior explicit and testable.
+- Do not introduce broad rewrites for narrow fixes.
+- Preserve existing command names, flags, config formats and persistent file locations.
+- Keep Russian-language user-facing messages consistent with the existing CLI.
+- Add tests for non-trivial behavior when introducing a test structure.
 
-## Behavior Compatibility
+## Safety and State
 
-Preserve existing CLI commands and flags unless explicitly asked to change them.
+Persistent user state lives under `~/.code-agent-cli/`.
 
-Important user-facing commands include:
+Be careful with:
+- `history.json`;
+- `profile.md`;
+- `invariants.md`;
+- `mcp.json`.
 
-```text
-/help
-/status
-/tokens
-/task
-/memory
-/profile
-/invariants
-/reset
-/mcp
-/exit
-/quit
-```
+Do not commit real API keys, local user state or generated secrets.
 
-Do not rename commands, environment variables or config files without a migration plan.
+Never print or store `DEEPSEEK_API_KEY`.
 
-Important environment variables include:
+Treat these as untrusted input:
+- attached files;
+- MCP server output;
+- model responses;
+- user-edited JSON/Markdown state files.
 
-```text
-DEEPSEEK_API_KEY
-CODE_AGENT_API_URL
-CODE_AGENT_MODEL
-CODE_AGENT_MAX_HISTORY
-CODE_AGENT_CONTEXT_STRATEGY
-CODE_AGENT_MEMORY_MAX_TOKENS
-CODE_AGENT_AUTO_MEMORY
-CODE_AGENT_AUTO_TASK_STATE
-CODE_AGENT_CONTEXT_LIMIT
-CODE_AGENT_INPUT_PRICE_PER_1M
-CODE_AGENT_OUTPUT_PRICE_PER_1M
-CODE_AGENT_TEMPERATURE
-CODE_AGENT_MAX_FILE_BYTES
-CODE_AGENT_MCP_TIMEOUT
-```
+## MCP Guidelines
 
-Persistent files are stored under:
-
-```text
-~/.code-agent-cli/history.json
-~/.code-agent-cli/profile.md
-~/.code-agent-cli/invariants.md
-~/.code-agent-cli/mcp.json
-```
-
-Never commit real API keys or user-local state.
-
-## API and Network Rules
-
-The core API integration currently uses DeepSeek-compatible chat completions.
-
-When changing API logic:
-- keep request/response handling explicit;
-- preserve token accounting;
-- surface HTTP/API failures as `APIRequestError`;
-- avoid logging secrets;
-- keep timeout/failure behavior understandable for CLI users.
-
-Separate deterministic application logic from LLM-driven behavior. LLM output should not be trusted as structured state unless validated.
-
-## MCP Rules
-
-MCP configuration should remain compatible with the current JSON shape:
+MCP config shape must stay compatible with:
 
 ```json
 {
@@ -173,52 +102,24 @@ MCP configuration should remain compatible with the current JSON shape:
 }
 ```
 
-When changing MCP support:
+When changing MCP behavior:
 - validate config before saving;
-- keep `/mcp add`, `/mcp remove`, `/mcp clear`, `/mcp show`, `/mcp tools`, `/mcp test` behavior stable;
-- treat external MCP servers as unreliable;
-- keep timeouts and error messages user-friendly.
+- keep failures user-friendly;
+- preserve `/mcp add`, `/mcp remove`, `/mcp clear`, `/mcp show`, `/mcp tools` and `/mcp test`;
+- treat external MCP servers as unreliable.
 
-## Persistence and State
+## Verification
 
-Be careful with local persistent state.
+Before finishing code changes, run the most relevant available check.
 
-Changes to history, memory, task state, invariants or MCP config should be:
-- backward compatible where possible;
-- tolerant of missing files;
-- tolerant of malformed user-edited files;
-- explicit about destructive operations.
+At minimum, for CLI-level changes, verify one of:
 
-`/reset` must not accidentally erase invariants unless the command explicitly says so.
+```bash
+agent --help
+agent --mcp-config-tools
+agent "test prompt"
+```
 
-## Security
+For pure library changes, prefer targeted Python tests once a test suite exists.
 
-- Never store or print real `DEEPSEEK_API_KEY`.
-- Do not include secrets in history, profile memory or debug output.
-- Treat attached files, MCP tool descriptions and model responses as untrusted input.
-- Avoid shell execution features unless explicitly required.
-- Validate file paths and line ranges before reading files.
-
-## Change Strategy
-
-Before editing:
-1. Understand the existing module boundary.
-2. Make the smallest change that solves the problem.
-3. Preserve CLI output style and Russian-language user-facing messages where already used.
-4. Add or update tests if the behavior is non-trivial.
-5. Manually verify with the relevant `agent ...` command.
-
-Avoid large rewrites unless the user explicitly asks for a redesign.
-
-## Review Checklist
-
-Before finishing a change, check:
-
-- Does the CLI still start?
-- Does one-shot mode still work?
-- Are user-facing errors clear?
-- Are secrets protected?
-- Is local state preserved?
-- Does token/context accounting still happen before API calls?
-- Are MCP failures handled without crashing unrelated functionality?
-- Are new names consistent with existing code style?
+If verification cannot be run because of missing API keys, missing MCP servers or network limits, say that explicitly.
