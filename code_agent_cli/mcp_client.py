@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -21,6 +22,31 @@ class MCPTool:
     title: str | None
     description: str | None
     input_schema: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MCPToolCallResult:
+    content: list[dict[str, Any]]
+    structured_content: dict[str, Any] | None = None
+    is_error: bool = False
+
+    def as_text(self) -> str:
+        if self.structured_content is not None:
+            return json.dumps(
+                self.structured_content,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        text_values = [
+            item["text"]
+            for item in self.content
+            if item.get("type") == "text" and isinstance(item.get("text"), str)
+        ]
+        if text_values:
+            return "\n".join(text_values)
+
+        return json.dumps(self.content, ensure_ascii=False, indent=2)
 
 
 async def list_mcp_tools(
@@ -62,6 +88,47 @@ async def list_mcp_tools(
         raise MCPConnectionError(format_connection_error(error)) from error
 
 
+async def call_mcp_tool(
+    command: str,
+    args: list[str],
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> MCPToolCallResult:
+    """Connect to an MCP server over stdio and call one advertised tool."""
+
+    try:
+        process_env = {**os.environ, **env} if env else None
+        server_params = StdioServerParameters(
+            command=command,
+            args=args,
+            cwd=str(cwd) if cwd else None,
+            env=process_env,
+        )
+
+        async with AsyncExitStack() as exit_stack:
+            errlog = exit_stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
+            transport = await exit_stack.enter_async_context(
+                stdio_client(server_params, errlog=errlog)
+            )
+            read_stream, write_stream = transport
+            session = await exit_stack.enter_async_context(
+                ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=timeout),
+                )
+            )
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments or {})
+            return _parse_tool_call_result(result)
+    except Exception as error:
+        raise MCPConnectionError(format_connection_error(error)) from error
+
+
 def format_connection_error(error: BaseException) -> str:
     if isinstance(error, ExceptionGroup):
         messages = [format_connection_error(child) for child in error.exceptions]
@@ -96,3 +163,39 @@ def _parse_tool(raw_tool: Any) -> MCPTool:
         description=description,
         input_schema=input_schema,
     )
+
+
+def _parse_tool_call_result(raw_result: Any) -> MCPToolCallResult:
+    content = getattr(raw_result, "content", None)
+    structured_content = getattr(raw_result, "structuredContent", None)
+    is_error = bool(getattr(raw_result, "isError", False))
+
+    if not isinstance(content, list):
+        raise MCPConnectionError("MCP-сервер вернул некорректный call_tool content.")
+
+    parsed_content = [_parse_content_item(item) for item in content]
+    if structured_content is not None and not isinstance(structured_content, dict):
+        raise MCPConnectionError("MCP-сервер вернул некорректный structuredContent.")
+
+    return MCPToolCallResult(
+        content=parsed_content,
+        structured_content=structured_content,
+        is_error=is_error,
+    )
+
+
+def _parse_content_item(raw_item: Any) -> dict[str, Any]:
+    if hasattr(raw_item, "model_dump"):
+        payload = raw_item.model_dump(mode="json", exclude_none=True)
+        if isinstance(payload, dict):
+            return payload
+
+    item_type = getattr(raw_item, "type", None)
+    if isinstance(item_type, str):
+        payload: dict[str, Any] = {"type": item_type}
+        text = getattr(raw_item, "text", None)
+        if isinstance(text, str):
+            payload["text"] = text
+        return payload
+
+    raise MCPConnectionError("MCP-сервер вернул некорректный content item.")

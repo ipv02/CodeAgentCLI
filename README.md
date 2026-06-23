@@ -185,6 +185,55 @@ agent --mcp-config-tools
 /mcp help
 ```
 
+## Встроенный mock HTTP API MCP
+
+Для первого собственного MCP-инструмента в проекте есть встроенный stdio-сервер
+вокруг публичного mock API `http://jsonplaceholder.typicode.com`.
+
+Подключить сервер:
+
+```text
+agent
+/mcp init-mock
+```
+
+Проверить регистрацию инструмента и описание входных параметров:
+
+```text
+/mcp tools
+```
+
+Ожидаемый инструмент:
+
+```text
+get_mock_user
+Вход: user_id: integer, required
+```
+
+Вызвать инструмент напрямую из приложения:
+
+```text
+/mcp call mock-api get_mock_user {"user_id": 1}
+```
+
+Инструмент делает HTTP-запрос:
+
+```text
+GET http://jsonplaceholder.typicode.com/users/1
+```
+
+И возвращает нормализованный результат с `id`, `name`, `email`, `company`,
+`city` и ссылкой на источник.
+
+Обычный запрос к агенту тоже может использовать MCP-результат:
+
+```text
+расскажи про mock user 1
+```
+
+В этом сценарии `agent` вызывает MCP-инструмент `mock-api/get_mock_user`,
+получает результат и передает его модели как контекст для ответа.
+
 Создать готовый config для Apple MCP и Cupertino:
 
 ```bash

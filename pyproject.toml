@@ -5,6 +5,7 @@ description = "Standalone terminal coding assistant based on the LLMRequest agen
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "certifi>=2024.8.30",
     "mcp>=1.27,<2",
 ]
 

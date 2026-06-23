@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,15 @@ def env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on", "да"}
+
+
+def https_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 @dataclass
@@ -386,7 +396,7 @@ class CodeAgent:
         )
 
         try:
-            with urlopen(request, timeout=120) as response:
+            with urlopen(request, timeout=120, context=https_ssl_context()) as response:
                 response_text = response.read().decode("utf-8")
         except HTTPError as error:
             response_text = error.read().decode("utf-8")

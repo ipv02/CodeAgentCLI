@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import itertools
+import json
 import os
 import re
 import shlex
@@ -39,7 +40,13 @@ from code_agent_cli.mcp_config import (
     remove_mcp_server,
     save_default_apple_mcp_config,
 )
-from code_agent_cli.mcp_client import MCPConnectionError, MCPTool, list_mcp_tools
+from code_agent_cli.mcp_client import (
+    MCPConnectionError,
+    MCPTool,
+    MCPToolCallResult,
+    call_mcp_tool,
+    list_mcp_tools,
+)
 from code_agent_cli.tokens import TokenBreakdown
 
 
@@ -409,12 +416,16 @@ def print_mcp_help() -> None:
             ("/mcp path", "показать путь к config"),
             ("/mcp test", "проверить подключение с диагностикой ошибок"),
             ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
+            ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+            ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
         ),
     )
     print()
     print(indented_line("Примеры:"))
+    print(indented_line('/mcp init-mock', level=2))
+    print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
     print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
     print(indented_line("/mcp add cupertino -- cupertino serve --no-reap", level=2))
 
@@ -494,6 +505,110 @@ def clear_mcp_servers_from_command(config_path: Path) -> None:
     print(status_line("Конфиг", str(saved_path), VALUE))
     print()
     print(indented_line("Все MCP-серверы удалены из config."))
+
+
+def init_mock_mcp_config(config_path: Path) -> None:
+    server = MCPServerConfig(
+        name="mock-api",
+        command=sys.executable,
+        args=["-m", "code_agent_cli.mock_api_mcp_server"],
+    )
+
+    try:
+        saved_path = add_mcp_server(config_path, server, overwrite=True)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("Сервер подключен", "mock-api", SUCCESS))
+    print(status_line("API", "http://jsonplaceholder.typicode.com", VALUE))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Проверить инструменты:"))
+    print(indented_line("/mcp tools", level=2))
+    print()
+    print(indented_line("Вызвать инструмент:"))
+    print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
+
+
+def call_mcp_tool_from_command(config_path: Path, argument: str) -> None:
+    parts = argument.split(maxsplit=3)
+    if len(parts) < 3 or parts[0] != "call":
+        print('Использование: /mcp call SERVER TOOL {"param": "value"}')
+        return
+
+    server_name = parts[1]
+    tool_name = parts[2]
+    raw_arguments = parts[3] if len(parts) == 4 else "{}"
+
+    try:
+        tool_arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as error:
+        print(f"Ошибка MCP: аргументы tool должны быть JSON object: {error}", file=sys.stderr)
+        return
+
+    if not isinstance(tool_arguments, dict):
+        print("Ошибка MCP: аргументы tool должны быть JSON object.", file=sys.stderr)
+        return
+
+    try:
+        config = load_mcp_config(config_path)
+    except MCPConfigError as error:
+        print_mcp_config_missing(config_path, error if config_path.exists() else None)
+        return
+
+    server = find_mcp_server(config, server_name)
+    if server is None:
+        print(f"Ошибка MCP: server не найден: {server_name}", file=sys.stderr)
+        return
+
+    try:
+        result = asyncio.run(
+            call_mcp_tool(
+                server.command,
+                server.args,
+                tool_name,
+                tool_arguments,
+                cwd=server.cwd,
+                env=server.env,
+                timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+            )
+        )
+    except FileNotFoundError:
+        print(f"Ошибка MCP: команда server не найдена: {server.command}", file=sys.stderr)
+        return
+    except MCPConnectionError as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return
+    except Exception as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return
+
+    print_mcp_tool_call_result(server_name, tool_name, result)
+
+
+def find_mcp_server(config: MCPConfig, name: str) -> MCPServerConfig | None:
+    for server in config.servers:
+        if server.name == name:
+            return server
+    return None
+
+
+def print_mcp_tool_call_result(
+    server_name: str,
+    tool_name: str,
+    result: MCPToolCallResult,
+) -> None:
+    print(header_line("MCP call"))
+    print(status_line("Server", server_name, VALUE))
+    print(status_line("Tool", tool_name, VALUE))
+    print(status_line("Status", "Error" if result.is_error else "OK", ERROR if result.is_error else SUCCESS))
+    print()
+    print(result.as_text())
 
 
 def print_mcp_config_status(
@@ -776,7 +891,7 @@ def build_prompt(args: argparse.Namespace) -> PromptPayload:
 
 
 def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
-    payload = normalize_prompt(prompt)
+    payload = enrich_prompt_with_mcp_tool_context(normalize_prompt(prompt))
     fast_answer = agent.handle_memory_only_message(
         payload.request_text,
         history_text=payload.history_text,
@@ -826,6 +941,71 @@ def normalize_prompt(prompt: str | PromptPayload) -> PromptPayload:
     if isinstance(prompt, PromptPayload):
         return prompt
     return PromptPayload(request_text=prompt)
+
+
+def enrich_prompt_with_mcp_tool_context(payload: PromptPayload) -> PromptPayload:
+    mock_user_id = extract_mock_user_id(payload.request_text)
+    if mock_user_id is None:
+        return payload
+
+    try:
+        config = load_mcp_config(default_mcp_config_file())
+    except MCPConfigError:
+        return payload
+
+    server = find_mcp_server(config, "mock-api")
+    if server is None:
+        return payload
+
+    arguments = {"user_id": mock_user_id}
+    try:
+        result = asyncio.run(
+            call_mcp_tool(
+                server.command,
+                server.args,
+                "get_mock_user",
+                arguments,
+                cwd=server.cwd,
+                env=server.env,
+                timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+            )
+        )
+    except Exception as error:
+        tool_context = f"MCP tool mock-api/get_mock_user failed: {error}"
+    else:
+        tool_context = result.as_text()
+
+    request_text = f"""{payload.request_text}
+
+Контекст MCP-инструмента:
+Server: mock-api
+Tool: get_mock_user
+Arguments: {json.dumps(arguments, ensure_ascii=False)}
+Result:
+```json
+{tool_context}
+```
+
+Ответь на исходный запрос пользователя, используя результат MCP-инструмента. Не выдумывай поля, которых нет в результате."""
+
+    history_note = (
+        payload.history_text or payload.request_text
+    ) + "\n\n[MCP tool mock-api/get_mock_user был вызван и использован в ответе.]"
+    return PromptPayload(request_text=request_text, history_text=history_note)
+
+
+def extract_mock_user_id(text: str) -> int | None:
+    patterns = (
+        r"\bmock\s+user\s*#?(\d+)\b",
+        r"\bjsonplaceholder\s+user\s*#?(\d+)\b",
+        r"\bmock[-\s]*(?:api\s+)?(?:пользователь|юзер)\s*#?(\d+)\b",
+        r"\b(?:пользователь|юзер)\s+из\s+mock\s+api\s*#?(\d+)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 @contextmanager
@@ -960,6 +1140,8 @@ def print_help() -> None:
             ("/mcp test", "проверить MCP-серверы с диагностикой ошибок"),
             ("/mcp path", "показать путь к MCP config"),
             ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
+            ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+            ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
         ),
@@ -1567,6 +1749,10 @@ def handle_mcp_command(argument: str) -> None:
         clear_mcp_servers_from_command(config_path)
         return
 
+    if command.startswith("call "):
+        call_mcp_tool_from_command(config_path, argument.strip())
+        return
+
     if command in {"show", "config", "list-servers"}:
         try:
             config = load_mcp_config_or_empty(config_path)
@@ -1617,7 +1803,11 @@ def handle_mcp_command(argument: str) -> None:
         init_apple_mcp_config(config_path, force=command.endswith(" force"))
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp show | /mcp test | /mcp help")
+    if command == "init-mock":
+        init_mock_mcp_config(config_path)
+        return
+
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp call SERVER TOOL JSON | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:
