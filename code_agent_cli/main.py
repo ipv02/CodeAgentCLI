@@ -976,10 +976,22 @@ def print_scheduler_run_line(run: dict[str, Any]) -> None:
 def print_scheduler_run_details(run: dict[str, Any]) -> None:
     status = str(run.get("status", ""))
     status_color = SUCCESS if status == "success" else ERROR
+    result = run.get("result")
+    result_payload = result if isinstance(result, dict) else {}
     print(status_line("Job", str(run.get("job_title", "")), VALUE))
     print(status_line("Тип", str(run.get("job_kind", "")), VALUE))
     print(status_line("Статус", status, status_color))
     print(status_line("Завершен", str(run.get("finished_at", "")), VALUE))
+    if result_payload.get("type") == "llm_summary":
+        print(status_line("Источник", "LLM-generated summary", SUCCESS))
+        model = result_payload.get("model")
+        if model:
+            print(status_line("Модель", str(model), VALUE))
+        usage = result_payload.get("usage")
+        if isinstance(usage, dict) and usage:
+            total = usage.get("total_tokens")
+            if total is not None:
+                print(status_line("Tokens", str(total), VALUE))
     message = scheduler_run_message(run)
     if message:
         print(status_line("Результат", message, SUCCESS if status == "success" else ERROR))

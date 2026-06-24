@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from code_agent_cli.agent import env_float, https_ssl_context
 from code_agent_cli.scheduler_storage import (
     SchedulerJob,
     SchedulerRun,
@@ -15,6 +20,10 @@ from code_agent_cli.scheduler_storage import (
 
 class SchedulerError(Exception):
     """Raised when a scheduler operation cannot be completed."""
+
+
+class SchedulerLLMError(SchedulerError):
+    """Raised when a scheduled LLM summary cannot be generated."""
 
 
 def utc_now() -> datetime:
@@ -92,7 +101,7 @@ class SchedulerService:
             id=uuid4().hex,
             kind="periodic_summary",
             title=clean_title,
-            payload={"summary_text": clean_summary_text},
+            payload={"prompt": clean_summary_text},
             schedule_type="interval",
             run_at=None,
             interval_seconds=interval_seconds,
@@ -201,16 +210,100 @@ def execute_job(job: SchedulerJob, now: datetime) -> dict[str, Any]:
         }
 
     if job.kind == "periodic_summary":
-        summary_text = str(job.payload.get("summary_text") or "")
+        prompt = str(job.payload.get("prompt") or job.payload.get("summary_text") or "")
+        generated = generate_llm_summary(job.title, prompt, now)
         return {
-            "type": "periodic_summary",
+            "type": "llm_summary",
             "title": job.title,
-            "summary": summary_text,
-            "message": f"Регулярная сводка: {summary_text}",
+            "prompt": prompt,
+            "summary": generated["content"],
+            "message": generated["content"],
+            "model": generated["model"],
+            "usage": generated["usage"],
             "executed_at": to_iso(now),
         }
 
     raise SchedulerError(f"Неизвестный тип job: {job.kind}")
+
+
+def generate_llm_summary(title: str, prompt: str, now: datetime) -> dict[str, Any]:
+    clean_prompt = prompt.strip()
+    if not clean_prompt:
+        raise SchedulerLLMError("prompt для LLM-сводки пуст.")
+
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise SchedulerLLMError("DEEPSEEK_API_KEY не задан.")
+
+    model = os.getenv("CODE_AGENT_MODEL", "deepseek-v4-flash")
+    api_url = os.getenv("CODE_AGENT_API_URL", "https://api.deepseek.com/chat/completions")
+    temperature = env_float("CODE_AGENT_TEMPERATURE", 0.2)
+    max_tokens = int(os.getenv("CODE_AGENT_SCHEDULER_MAX_TOKENS", "700"))
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты фоновый агент CodeAgentCLI. По расписанию генерируй краткую, "
+                "практичную сводку на русском языке. Не выдумывай факты: если "
+                "данных недостаточно, явно скажи, что доступен только prompt задачи."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Название задачи: {title}\n"
+                f"Время запуска UTC: {to_iso(now)}\n\n"
+                "Инструкция для регулярной сводки:\n"
+                f"{clean_prompt}\n\n"
+                "Верни 3-7 коротких пунктов или один короткий абзац, если пунктов мало."
+            ),
+        },
+    ]
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    request = Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=120, context=https_ssl_context()) as response:
+            response_text = response.read().decode("utf-8")
+    except HTTPError as error:
+        response_text = error.read().decode("utf-8")
+        raise SchedulerLLMError(f"LLM API вернул HTTP {error.code}: {response_text}") from error
+    except OSError as error:
+        raise SchedulerLLMError(f"LLM API недоступен: {error}") from error
+
+    try:
+        response_payload = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise SchedulerLLMError("LLM API вернул некорректный JSON.") from error
+
+    choices = response_payload.get("choices") or []
+    usage = response_payload.get("usage") or {}
+    if not choices:
+        raise SchedulerLLMError("LLM API не вернул choices.")
+
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise SchedulerLLMError("LLM API вернул пустую сводку.")
+
+    return {
+        "content": content.strip(),
+        "model": model,
+        "usage": usage if isinstance(usage, dict) else {},
+    }
 
 
 def job_to_dict(job: SchedulerJob) -> dict[str, Any]:
