@@ -182,6 +182,7 @@ agent --mcp-config-tools
 /mcp clear
 /mcp path
 /mcp test
+/mcp init-scheduler
 /mcp help
 ```
 
@@ -233,6 +234,113 @@ GET http://jsonplaceholder.typicode.com/users/1
 
 В этом сценарии `agent` вызывает MCP-инструмент `mock-api/get_mock_user`,
 получает результат и передает его модели как контекст для ответа.
+
+## MCP-планировщик и фоновые задачи
+
+В проекте есть встроенный stdio MCP-сервер `scheduler` для отложенных и
+периодических задач. Он хранит задачи и результаты запусков в SQLite:
+
+```text
+~/.code-agent-cli/scheduler.db
+```
+
+Подключить сервер:
+
+```text
+agent
+/mcp init-scheduler
+```
+
+Проверить инструменты:
+
+```text
+/mcp tools
+```
+
+Основные tools:
+
+```text
+health
+remind
+every
+jobs
+delete
+run_due
+summary
+```
+
+Создать отложенное напоминание:
+
+```text
+/mcp remind "Проверить статус проекта" 2026-06-24T12:30:00Z
+```
+
+Создать периодическую сводку:
+
+```text
+/mcp every "Daily summary" 1440 "Собрать краткую сводку по проекту"
+```
+
+Выполнить задачи, срок которых наступил:
+
+```text
+/mcp run_due
+```
+
+Получить агрегированный результат:
+
+```text
+/mcp summary
+```
+
+Низкоуровневый JSON-вызов тоже доступен:
+
+```text
+/mcp call scheduler remind {"text":"Проверить статус проекта","run_at":"2026-06-24T12:30:00Z"}
+```
+
+Проверочный сценарий для задания:
+
+```text
+/mcp init-scheduler
+/mcp remind "Проверить фоновую задачу" 2020-01-01T00:00:00Z
+/mcp run_due
+/mcp summary
+```
+
+В выводе нужно проверить ключевые строки:
+
+```text
+Reminder создан
+Сохранено: SQLite jobs
+Due jobs: 1
+Успешно: 1
+Сохранено: SQLite job_runs
+Сводка планировщика
+Последних запусков: 1
+Ошибок: 0
+Результат: Напоминание: Проверить фоновую задачу
+```
+
+В интерактивном терминале успешные статусы, ошибки, даты следующего запуска и
+ключевые значения подсвечиваются цветом.
+
+Для фонового режима установочный пакет добавляет команду `scheduler-runner`.
+Одноразовый запуск подходит для cron или systemd timer:
+
+```bash
+scheduler-runner
+```
+
+Постоянный процесс 24/7:
+
+```bash
+scheduler-runner --watch --interval 60
+```
+
+В таком режиме MCP tools создают и читают задачи, SQLite хранит состояние, а
+`scheduler-runner` периодически выполняет due jobs и сохраняет результаты,
+которые затем возвращает `summary`.
 
 Создать готовый config для Apple MCP и Cupertino:
 

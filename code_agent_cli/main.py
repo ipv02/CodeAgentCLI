@@ -417,6 +417,10 @@ def print_mcp_help() -> None:
             ("/mcp test", "проверить подключение с диагностикой ошибок"),
             ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
             ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+            ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
+            ("/mcp remind TEXT AT", "создать reminder без JSON"),
+            ("/mcp run_due", "выполнить due jobs"),
+            ("/mcp summary", "показать сводку scheduler"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
@@ -425,7 +429,12 @@ def print_mcp_help() -> None:
     print()
     print(indented_line("Примеры:"))
     print(indented_line('/mcp init-mock', level=2))
+    print(indented_line('/mcp init-scheduler', level=2))
+    print(indented_line('/mcp remind "Проверить планировщик" 2026-06-24T12:30:00Z', level=2))
+    print(indented_line("/mcp run_due", level=2))
+    print(indented_line("/mcp summary", level=2))
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
+    print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
     print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
     print(indented_line("/mcp add cupertino -- cupertino serve --no-reap", level=2))
 
@@ -535,6 +544,54 @@ def init_mock_mcp_config(config_path: Path) -> None:
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
 
 
+def init_scheduler_mcp_config(config_path: Path) -> None:
+    scheduler_env = {}
+    scheduler_db = os.getenv("CODE_AGENT_SCHEDULER_DB")
+    if scheduler_db:
+        scheduler_env["CODE_AGENT_SCHEDULER_DB"] = scheduler_db
+
+    server = MCPServerConfig(
+        name="scheduler",
+        command=sys.executable,
+        args=["-m", "code_agent_cli.scheduler_mcp_server"],
+        env=scheduler_env,
+    )
+
+    try:
+        saved_path = add_mcp_server(config_path, server, overwrite=True)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("Сервер подключен", "scheduler", SUCCESS))
+    print(status_line("Хранилище", scheduler_db or "~/.code-agent-cli/scheduler.db", VALUE))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Проверить инструменты:"))
+    print(indented_line("/mcp tools", level=2))
+    print()
+    print(indented_line("Создать reminder:"))
+    print(
+        indented_line(
+            '/mcp remind "Проверить сводку" 2026-06-24T12:30:00Z',
+            level=2,
+        )
+    )
+    print()
+    print(indented_line("Запустить due jobs вручную:"))
+    print(indented_line("/mcp run_due", level=2))
+    print()
+    print(indented_line("Показать сводку:"))
+    print(indented_line("/mcp summary", level=2))
+    print()
+    print(indented_line("Фоновый запуск:"))
+    print(indented_line("scheduler-runner --watch --interval 60", level=2))
+
+
 def call_mcp_tool_from_command(config_path: Path, argument: str) -> None:
     parts = argument.split(maxsplit=3)
     if len(parts) < 3 or parts[0] != "call":
@@ -591,6 +648,166 @@ def call_mcp_tool_from_command(config_path: Path, argument: str) -> None:
     print_mcp_tool_call_result(server_name, tool_name, result)
 
 
+def call_scheduler_tool_from_short_command(
+    config_path: Path,
+    tool_name: str,
+    tool_arguments: dict[str, Any],
+) -> None:
+    call_mcp_tool_from_values(config_path, "scheduler", tool_name, tool_arguments)
+
+
+def call_mcp_tool_from_values(
+    config_path: Path,
+    server_name: str,
+    tool_name: str,
+    tool_arguments: dict[str, Any],
+) -> None:
+    try:
+        config = load_mcp_config(config_path)
+    except MCPConfigError as error:
+        print_mcp_config_missing(config_path, error if config_path.exists() else None)
+        return
+
+    server = find_mcp_server(config, server_name)
+    if server is None:
+        print(f"Ошибка MCP: server не найден: {server_name}", file=sys.stderr)
+        if server_name == "scheduler":
+            print("Подключите scheduler: /mcp init-scheduler")
+        return
+
+    try:
+        result = asyncio.run(
+            call_mcp_tool(
+                server.command,
+                server.args,
+                tool_name,
+                tool_arguments,
+                cwd=server.cwd,
+                env=server.env,
+                timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+            )
+        )
+    except FileNotFoundError:
+        print(f"Ошибка MCP: команда server не найдена: {server.command}", file=sys.stderr)
+        return
+    except MCPConnectionError as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return
+    except Exception as error:
+        print(f"Ошибка MCP: {error}", file=sys.stderr)
+        return
+
+    print_mcp_tool_call_result(server_name, tool_name, result)
+
+
+def handle_scheduler_short_command(config_path: Path, command: str, argument: str) -> bool:
+    if command == "remind":
+        reminder = parse_scheduler_remind_arguments(argument)
+        if reminder is None:
+            print('Использование: /mcp remind "Текст напоминания" 2026-06-24T12:30:00Z')
+            return True
+        call_scheduler_tool_from_short_command(config_path, "remind", reminder)
+        return True
+
+    if command == "every":
+        periodic = parse_scheduler_every_arguments(argument)
+        if periodic is None:
+            print('Использование: /mcp every "Daily summary" 1440 "Собрать краткую сводку"')
+            return True
+        call_scheduler_tool_from_short_command(config_path, "every", periodic)
+        return True
+
+    if command == "jobs":
+        call_scheduler_tool_from_short_command(config_path, "jobs", {})
+        return True
+
+    if command == "run_due":
+        tool_arguments = parse_optional_limit_argument(argument)
+        if tool_arguments is None:
+            print("Использование: /mcp run_due [LIMIT]")
+            return True
+        call_scheduler_tool_from_short_command(config_path, "run_due", tool_arguments)
+        return True
+
+    if command == "summary":
+        tool_arguments = parse_optional_limit_argument(argument)
+        if tool_arguments is None:
+            print("Использование: /mcp summary [LIMIT]")
+            return True
+        call_scheduler_tool_from_short_command(config_path, "summary", tool_arguments)
+        return True
+
+    if command == "health":
+        call_scheduler_tool_from_short_command(config_path, "health", {})
+        return True
+
+    return False
+
+
+def parse_scheduler_remind_arguments(argument: str) -> dict[str, Any] | None:
+    try:
+        parts = shlex.split(argument)
+    except ValueError as error:
+        print(f"Ошибка scheduler: {error}", file=sys.stderr)
+        return None
+    if len(parts) < 2:
+        return None
+    return {
+        "text": " ".join(parts[:-1]).strip(),
+        "run_at": parts[-1],
+    }
+
+
+def parse_scheduler_every_arguments(argument: str) -> dict[str, Any] | None:
+    try:
+        parts = shlex.split(argument)
+    except ValueError as error:
+        print(f"Ошибка scheduler: {error}", file=sys.stderr)
+        return None
+    if len(parts) < 3:
+        return None
+    try:
+        interval_minutes = int(parts[1])
+    except ValueError:
+        return None
+    return {
+        "title": parts[0],
+        "interval_minutes": interval_minutes,
+        "summary_text": " ".join(parts[2:]).strip(),
+    }
+
+
+def parse_optional_limit_argument(argument: str) -> dict[str, Any] | None:
+    if not argument:
+        return {}
+    try:
+        limit = int(argument.strip())
+    except ValueError:
+        return None
+    if limit < 1:
+        return None
+    return {"limit": limit}
+
+
+def warn_bare_scheduler_tool(text: str) -> bool:
+    parts = text.split(maxsplit=1)
+    if len(parts) != 1:
+        return False
+    command = parts[0].lower()
+    if command not in {"health", "remind", "every", "jobs", "delete", "run_due", "summary"}:
+        return False
+
+    print(header_line("Scheduler"))
+    print(status_line("Команда", command, WARNING))
+    print(status_line("Статус", "это MCP tool, не обычный prompt", WARNING))
+    print()
+    print(indented_line("Используйте короткие команды через /mcp:"))
+    print(indented_line('/mcp remind "Проверить планировщик" 2026-06-24T12:30:00Z', level=2))
+    print(indented_line("/mcp run_due", level=2))
+    print(indented_line("/mcp summary", level=2))
+    return True
+
+
 def find_mcp_server(config: MCPConfig, name: str) -> MCPServerConfig | None:
     for server in config.servers:
         if server.name == name:
@@ -608,7 +825,203 @@ def print_mcp_tool_call_result(
     print(status_line("Tool", tool_name, VALUE))
     print(status_line("Status", "Error" if result.is_error else "OK", ERROR if result.is_error else SUCCESS))
     print()
+    if print_scheduler_tool_call_result(server_name, tool_name, result):
+        return
     print(result.as_text())
+
+
+def print_scheduler_tool_call_result(
+    server_name: str,
+    tool_name: str,
+    result: MCPToolCallResult,
+) -> bool:
+    if server_name != "scheduler" or result.is_error:
+        return False
+
+    payload = parse_mcp_json_result(result)
+    if payload is None:
+        return False
+
+    if tool_name in {"remind", "every"}:
+        print_scheduler_created_job(tool_name, payload)
+        return True
+    if tool_name == "jobs":
+        print_scheduler_jobs(payload)
+        return True
+    if tool_name == "run_due":
+        print_scheduler_due_result(payload)
+        return True
+    if tool_name == "summary":
+        print_scheduler_summary(payload)
+        return True
+    if tool_name == "delete":
+        print(status_line("Job", str(payload.get("job_id", "")), VALUE))
+        deleted = bool(payload.get("deleted"))
+        print(status_line("Удален", "да" if deleted else "нет", SUCCESS if deleted else WARNING))
+        return True
+    if tool_name == "health":
+        print(status_line("Состояние", str(payload.get("status", "")), SUCCESS))
+        print(status_line("SQLite", str(payload.get("database", "")), VALUE))
+        return True
+
+    return False
+
+
+def parse_mcp_json_result(result: MCPToolCallResult) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(result.as_text())
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def print_scheduler_created_job(tool_name: str, payload: dict[str, Any]) -> None:
+    kind = "Reminder" if tool_name == "remind" else "Periodic summary"
+    print(colorize(f"{kind} создан", BOLD + SUCCESS))
+    print(status_line("Job ID", str(payload.get("id", "")), VALUE))
+    print(status_line("Название", str(payload.get("title", "")), VALUE))
+    print(status_line("Тип", str(payload.get("kind", "")), VALUE))
+    print(status_line("Следующий запуск", str(payload.get("next_run_at", "")), WARNING))
+    interval_seconds = payload.get("interval_seconds")
+    if isinstance(interval_seconds, int):
+        print(status_line("Интервал", format_seconds(interval_seconds), VALUE))
+    print(status_line("Сохранено", "SQLite jobs", SUCCESS))
+
+
+def print_scheduler_jobs(payload: dict[str, Any]) -> None:
+    jobs = ensure_list(payload.get("jobs"))
+    print(colorize("Список задач", BOLD + ACCENT))
+    print(status_line("Активных/найдено", str(payload.get("count", len(jobs))), VALUE))
+    if not jobs:
+        print(status_line("Очередь", "пусто", WARNING))
+        return
+
+    print()
+    for index, job in enumerate(jobs, start=1):
+        if not isinstance(job, dict):
+            continue
+        enabled = bool(job.get("enabled"))
+        state_color = SUCCESS if enabled else WARNING
+        print(command_line(f"{index}. {job.get('title', '')}"))
+        print(status_line("  Статус", "active" if enabled else "disabled", state_color))
+        print(status_line("  Тип", str(job.get("kind", "")), VALUE))
+        print(status_line("  Следующий запуск", str(job.get("next_run_at", "")), WARNING))
+
+
+def print_scheduler_due_result(payload: dict[str, Any]) -> None:
+    runs = ensure_list(payload.get("runs"))
+    success_count = count_runs_by_status(runs, "success")
+    error_count = len(runs) - success_count
+
+    print(colorize("Выполнение расписания", BOLD + ACCENT))
+    print(status_line("Проверено в", str(payload.get("checked_at", "")), VALUE))
+    print(status_line("Due jobs", str(payload.get("due_jobs", len(runs))), WARNING if runs else VALUE))
+    print(status_line("Успешно", str(success_count), SUCCESS))
+    print(status_line("Ошибок", str(error_count), ERROR if error_count else SUCCESS))
+    print(status_line("Сохранено", "SQLite job_runs", SUCCESS if runs else WARNING))
+
+    if not runs:
+        print()
+        print(status_line("Итог", "нет задач, срок которых наступил", WARNING))
+        return
+
+    print()
+    print(colorize("Запуски", BOLD + ACCENT_SOFT))
+    for run in runs:
+        if isinstance(run, dict):
+            print_scheduler_run_line(run)
+
+
+def print_scheduler_summary(payload: dict[str, Any]) -> None:
+    recent_runs = ensure_list(payload.get("recent_runs"))
+    next_runs = ensure_list(payload.get("next_runs"))
+    failed_runs = int(payload.get("failed_runs") or 0)
+    last_run = first_dict(recent_runs)
+
+    print(colorize("Сводка планировщика", BOLD + ACCENT))
+    print(status_line("Сформирована", str(payload.get("generated_at", "")), VALUE))
+    print(status_line("Активных задач", str(payload.get("active_jobs", 0)), VALUE))
+    print(status_line("Последних запусков", str(len(recent_runs)), VALUE))
+    print(status_line("Ошибок", str(failed_runs), ERROR if failed_runs else SUCCESS))
+    print(status_line("Данные", "SQLite jobs + job_runs", SUCCESS))
+
+    print()
+    if last_run is None:
+        print(status_line("Итог", "запусков еще не было", WARNING))
+    else:
+        print(colorize("Последний результат", BOLD + ACCENT_SOFT))
+        print_scheduler_run_details(last_run)
+
+    print()
+    print(colorize("Следующие задачи", BOLD + ACCENT_SOFT))
+    if not next_runs:
+        print(status_line("Очередь", "нет активных задач", WARNING))
+        return
+
+    for job in next_runs[:5]:
+        if isinstance(job, dict):
+            print(status_line(str(job.get("title", "")), str(job.get("next_run_at", "")), WARNING))
+
+
+def print_scheduler_run_line(run: dict[str, Any]) -> None:
+    status = str(run.get("status", ""))
+    status_color = SUCCESS if status == "success" else ERROR
+    title = str(run.get("job_title", ""))
+    print(status_line(title or "job", status, status_color))
+    message = scheduler_run_message(run)
+    if message:
+        print(indented_line(message, level=2))
+
+
+def print_scheduler_run_details(run: dict[str, Any]) -> None:
+    status = str(run.get("status", ""))
+    status_color = SUCCESS if status == "success" else ERROR
+    print(status_line("Job", str(run.get("job_title", "")), VALUE))
+    print(status_line("Тип", str(run.get("job_kind", "")), VALUE))
+    print(status_line("Статус", status, status_color))
+    print(status_line("Завершен", str(run.get("finished_at", "")), VALUE))
+    message = scheduler_run_message(run)
+    if message:
+        print(status_line("Результат", message, SUCCESS if status == "success" else ERROR))
+    error = run.get("error")
+    if error:
+        print(status_line("Ошибка", str(error), ERROR))
+
+
+def scheduler_run_message(run: dict[str, Any]) -> str:
+    result = run.get("result")
+    if not isinstance(result, dict):
+        return ""
+    message = result.get("message")
+    if isinstance(message, str):
+        return message
+    summary = result.get("summary")
+    if isinstance(summary, str):
+        return summary
+    return ""
+
+
+def count_runs_by_status(runs: list[Any], status: str) -> int:
+    return sum(1 for run in runs if isinstance(run, dict) and run.get("status") == status)
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def first_dict(values: list[Any]) -> dict[str, Any] | None:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def format_seconds(seconds: int) -> str:
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} ч"
+    if seconds % 60 == 0:
+        return f"{seconds // 60} мин"
+    return f"{seconds} сек"
 
 
 def print_mcp_config_status(
@@ -861,6 +1274,9 @@ def run_interactive_session(agent: CodeAgent) -> None:
 
         if command == "/mcp":
             handle_mcp_command(argument)
+            continue
+
+        if warn_bare_scheduler_tool(text):
             continue
 
         send(agent, text)
@@ -1141,6 +1557,10 @@ def print_help() -> None:
             ("/mcp path", "показать путь к MCP config"),
             ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
             ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+            ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
+            ("/mcp remind TEXT AT", "создать reminder без JSON"),
+            ("/mcp run_due", "выполнить due jobs scheduler"),
+            ("/mcp summary", "показать сводку scheduler"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
@@ -1737,6 +2157,10 @@ def handle_mcp_command(argument: str) -> None:
         print_mcp_help()
         return
 
+    short_command, _, short_argument = argument.strip().partition(" ")
+    if handle_scheduler_short_command(config_path, short_command.lower(), short_argument.strip()):
+        return
+
     if command.startswith("add "):
         add_mcp_server_from_command(config_path, argument.strip())
         return
@@ -1807,7 +2231,11 @@ def handle_mcp_command(argument: str) -> None:
         init_mock_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp call SERVER TOOL JSON | /mcp show | /mcp test | /mcp help")
+    if command == "init-scheduler":
+        init_scheduler_mcp_config(config_path)
+        return
+
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

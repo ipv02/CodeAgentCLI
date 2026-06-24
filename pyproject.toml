@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 agent = "code_agent_cli.main:main"
+scheduler-runner = "code_agent_cli.scheduler_runner:main"
 
 [build-system]
 requires = ["setuptools>=68"]
