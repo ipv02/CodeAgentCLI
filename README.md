@@ -361,6 +361,75 @@ scheduler-runner --watch --interval 60
 `scheduler-runner` периодически выполняет due jobs и сохраняет результаты,
 которые затем возвращает `summary`.
 
+## MCP pipeline: search -> summarize -> save
+
+В проекте есть встроенный MCP-сервер `pipeline`, который демонстрирует
+композицию нескольких MCP-инструментов:
+
+```text
+search
+summarize
+save
+run
+```
+
+Подключить сервер:
+
+```text
+agent
+/mcp init-pipeline
+```
+
+Проверить инструменты:
+
+```text
+/mcp tools
+```
+
+Запустить автоматическую цепочку:
+
+```text
+/mcp pipeline "latest Model Context Protocol news" mcp-summary.md
+```
+
+Агент также умеет сам распознавать обычную пользовательскую фразу и запускать
+pipeline без ручного `/mcp call`:
+
+```text
+найди мне Model Context Protocol MCP и сохрани в заметки
+```
+
+В этом сценарии `agent` автоматически вызывает MCP tool `pipeline/run`,
+который выполняет цепочку `search -> summarize -> save`, отвечает сводкой и
+сохраняет результат в `notes.md`.
+
+Что происходит внутри:
+
+```text
+search     -> ищет данные в интернете
+summarize  -> передает результаты поиска в LLM и делает сводку
+save       -> сохраняет результат в ~/.code-agent-cli/pipeline/
+run        -> автоматически выполняет search -> summarize -> save
+```
+
+Низкоуровневый вызов:
+
+```text
+/mcp call pipeline run {"query":"latest Model Context Protocol news","filename":"mcp-summary.md","limit":5}
+```
+
+В выводе нужно проверить ключевые строки:
+
+```text
+Автоматический MCP pipeline
+Цепочка: search -> summarize -> save
+Results: ...
+Items used: ...
+Model: deepseek-v4-flash
+Saved: yes
+Path: ~/.code-agent-cli/pipeline/mcp-summary.md
+```
+
 Создать готовый config для Apple MCP и Cupertino:
 
 ```bash

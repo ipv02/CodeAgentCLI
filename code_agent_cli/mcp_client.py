@@ -60,7 +60,7 @@ async def list_mcp_tools(
     """Connect to an MCP server over stdio and return its advertised tools."""
 
     try:
-        process_env = {**os.environ, **env} if env else None
+        process_env = {**os.environ, **(env or {})}
         server_params = StdioServerParameters(
             command=command,
             args=args,
@@ -101,7 +101,7 @@ async def call_mcp_tool(
     """Connect to an MCP server over stdio and call one advertised tool."""
 
     try:
-        process_env = {**os.environ, **env} if env else None
+        process_env = {**os.environ, **(env or {})}
         server_params = StdioServerParameters(
             command=command,
             args=args,

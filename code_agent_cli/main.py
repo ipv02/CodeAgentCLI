@@ -418,9 +418,11 @@ def print_mcp_help() -> None:
             ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
             ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
             ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
+            ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
             ("/mcp remind TEXT AT", "создать reminder без JSON"),
             ("/mcp run_due", "выполнить due jobs"),
             ("/mcp summary", "показать сводку scheduler"),
+            ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
@@ -430,9 +432,11 @@ def print_mcp_help() -> None:
     print(indented_line("Примеры:"))
     print(indented_line('/mcp init-mock', level=2))
     print(indented_line('/mcp init-scheduler', level=2))
+    print(indented_line('/mcp init-pipeline', level=2))
     print(indented_line('/mcp remind "Проверить планировщик" 2026-06-24T12:30:00Z', level=2))
     print(indented_line("/mcp run_due", level=2))
     print(indented_line("/mcp summary", level=2))
+    print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
     print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
     print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
@@ -592,6 +596,40 @@ def init_scheduler_mcp_config(config_path: Path) -> None:
     print(indented_line("scheduler-runner --watch --interval 60", level=2))
 
 
+def init_pipeline_mcp_config(config_path: Path) -> None:
+    pipeline_env = {}
+    pipeline_dir = os.getenv("CODE_AGENT_PIPELINE_DIR")
+    if pipeline_dir:
+        pipeline_env["CODE_AGENT_PIPELINE_DIR"] = pipeline_dir
+
+    server = MCPServerConfig(
+        name="pipeline",
+        command=sys.executable,
+        args=["-m", "code_agent_cli.pipeline_mcp_server"],
+        env=pipeline_env,
+    )
+
+    try:
+        saved_path = add_mcp_server(config_path, server, overwrite=True)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+    except OSError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("Сервер подключен", "pipeline", SUCCESS))
+    print(status_line("Вывод", pipeline_dir or "~/.code-agent-cli/pipeline", VALUE))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Проверить инструменты:"))
+    print(indented_line("/mcp tools", level=2))
+    print()
+    print(indented_line("Запустить pipeline:"))
+    print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
+
+
 def call_mcp_tool_from_command(config_path: Path, argument: str) -> None:
     parts = argument.split(maxsplit=3)
     if len(parts) < 3 or parts[0] != "call":
@@ -612,40 +650,7 @@ def call_mcp_tool_from_command(config_path: Path, argument: str) -> None:
         print("Ошибка MCP: аргументы tool должны быть JSON object.", file=sys.stderr)
         return
 
-    try:
-        config = load_mcp_config(config_path)
-    except MCPConfigError as error:
-        print_mcp_config_missing(config_path, error if config_path.exists() else None)
-        return
-
-    server = find_mcp_server(config, server_name)
-    if server is None:
-        print(f"Ошибка MCP: server не найден: {server_name}", file=sys.stderr)
-        return
-
-    try:
-        result = asyncio.run(
-            call_mcp_tool(
-                server.command,
-                server.args,
-                tool_name,
-                tool_arguments,
-                cwd=server.cwd,
-                env=server.env,
-                timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
-            )
-        )
-    except FileNotFoundError:
-        print(f"Ошибка MCP: команда server не найдена: {server.command}", file=sys.stderr)
-        return
-    except MCPConnectionError as error:
-        print(f"Ошибка MCP: {error}", file=sys.stderr)
-        return
-    except Exception as error:
-        print(f"Ошибка MCP: {error}", file=sys.stderr)
-        return
-
-    print_mcp_tool_call_result(server_name, tool_name, result)
+    call_mcp_tool_from_values(config_path, server_name, tool_name, tool_arguments)
 
 
 def call_scheduler_tool_from_short_command(
@@ -654,6 +659,14 @@ def call_scheduler_tool_from_short_command(
     tool_arguments: dict[str, Any],
 ) -> None:
     call_mcp_tool_from_values(config_path, "scheduler", tool_name, tool_arguments)
+
+
+def call_pipeline_tool_from_short_command(
+    config_path: Path,
+    tool_name: str,
+    tool_arguments: dict[str, Any],
+) -> None:
+    call_mcp_tool_from_values(config_path, "pipeline", tool_name, tool_arguments)
 
 
 def call_mcp_tool_from_values(
@@ -673,20 +686,23 @@ def call_mcp_tool_from_values(
         print(f"Ошибка MCP: server не найден: {server_name}", file=sys.stderr)
         if server_name == "scheduler":
             print("Подключите scheduler: /mcp init-scheduler")
+        if server_name == "pipeline":
+            print("Подключите pipeline: /mcp init-pipeline")
         return
 
     try:
-        result = asyncio.run(
-            call_mcp_tool(
-                server.command,
-                server.args,
-                tool_name,
-                tool_arguments,
-                cwd=server.cwd,
-                env=server.env,
-                timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+        with loader(mcp_loader_label(server_name, tool_name)):
+            result = asyncio.run(
+                call_mcp_tool(
+                    server.command,
+                    server.args,
+                    tool_name,
+                    tool_arguments,
+                    cwd=server.cwd,
+                    env=server.env,
+                    timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+                )
             )
-        )
     except FileNotFoundError:
         print(f"Ошибка MCP: команда server не найдена: {server.command}", file=sys.stderr)
         return
@@ -698,6 +714,14 @@ def call_mcp_tool_from_values(
         return
 
     print_mcp_tool_call_result(server_name, tool_name, result)
+
+
+def mcp_loader_label(server_name: str, tool_name: str) -> str:
+    if server_name == "pipeline" and tool_name == "run":
+        return "Выполняю MCP pipeline"
+    if server_name == "pipeline":
+        return f"Выполняю pipeline/{tool_name}"
+    return f"Выполняю MCP {server_name}/{tool_name}"
 
 
 def handle_scheduler_short_command(config_path: Path, command: str, argument: str) -> bool:
@@ -742,6 +766,31 @@ def handle_scheduler_short_command(config_path: Path, command: str, argument: st
         return True
 
     return False
+
+
+def handle_pipeline_short_command(config_path: Path, command: str, argument: str) -> bool:
+    if command != "pipeline":
+        return False
+
+    try:
+        parts = shlex.split(argument)
+    except ValueError as error:
+        print(f"Ошибка pipeline: {error}", file=sys.stderr)
+        return True
+
+    if len(parts) != 2:
+        print('Использование: /mcp pipeline "search query" result.md')
+        return True
+
+    call_pipeline_tool_from_short_command(
+        config_path,
+        "run",
+        {
+            "query": parts[0],
+            "filename": parts[1],
+        },
+    )
+    return True
 
 
 def parse_scheduler_remind_arguments(argument: str) -> dict[str, Any] | None:
@@ -825,9 +874,97 @@ def print_mcp_tool_call_result(
     print(status_line("Tool", tool_name, VALUE))
     print(status_line("Status", "Error" if result.is_error else "OK", ERROR if result.is_error else SUCCESS))
     print()
+    if print_pipeline_tool_call_result(server_name, tool_name, result):
+        return
     if print_scheduler_tool_call_result(server_name, tool_name, result):
         return
     print(result.as_text())
+
+
+def print_pipeline_tool_call_result(
+    server_name: str,
+    tool_name: str,
+    result: MCPToolCallResult,
+) -> bool:
+    if server_name != "pipeline" or result.is_error:
+        return False
+
+    payload = parse_mcp_json_result(result)
+    if payload is None:
+        return False
+
+    if tool_name == "search":
+        print_pipeline_search_result(payload)
+        return True
+    if tool_name == "summarize":
+        print_pipeline_summary_result(payload)
+        return True
+    if tool_name == "save":
+        print_pipeline_save_result(payload)
+        return True
+    if tool_name == "run":
+        print_pipeline_run_result(payload)
+        return True
+    if tool_name == "health":
+        print(status_line("Состояние", str(payload.get("status", "")), SUCCESS))
+        print(status_line("Output dir", str(payload.get("output_dir", "")), VALUE))
+        return True
+
+    return False
+
+
+def print_pipeline_search_result(payload: dict[str, Any]) -> None:
+    print(colorize("Pipeline step 1: search", BOLD + ACCENT))
+    print(status_line("Query", str(payload.get("query", "")), VALUE))
+    print(status_line("Results", str(payload.get("count", 0)), SUCCESS))
+    for result in ensure_list(payload.get("results"))[:3]:
+        if isinstance(result, dict):
+            print(status_line(str(result.get("title", "")), str(result.get("url", "")), VALUE))
+
+
+def print_pipeline_summary_result(payload: dict[str, Any]) -> None:
+    print(colorize("Pipeline step 2: summarize", BOLD + ACCENT))
+    print(status_line("Query", str(payload.get("query", "")), VALUE))
+    print(status_line("Items used", str(payload.get("items_used", 0)), SUCCESS))
+    print(status_line("Model", str(payload.get("model", "")), VALUE))
+    usage = payload.get("usage")
+    if isinstance(usage, dict) and usage.get("total_tokens") is not None:
+        print(status_line("Tokens", str(usage["total_tokens"]), VALUE))
+    print_multiline_value("Summary", str(payload.get("summary", "")))
+
+
+def print_pipeline_save_result(payload: dict[str, Any]) -> None:
+    saved = bool(payload.get("saved"))
+    print(colorize("Pipeline step 3: save", BOLD + ACCENT))
+    print(status_line("Saved", "yes" if saved else "no", SUCCESS if saved else ERROR))
+    print(status_line("Path", str(payload.get("path", "")), VALUE))
+    print(status_line("Bytes", str(payload.get("bytes", 0)), VALUE))
+
+
+def print_pipeline_run_result(payload: dict[str, Any]) -> None:
+    search_payload = payload.get("search") if isinstance(payload.get("search"), dict) else {}
+    summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    save_payload = payload.get("save") if isinstance(payload.get("save"), dict) else {}
+
+    print(colorize("Автоматический MCP pipeline", BOLD + ACCENT))
+    print(status_line("Цепочка", str(payload.get("pipeline", "")), SUCCESS))
+    print(status_line("Query", str(payload.get("query", "")), VALUE))
+    print()
+    print_pipeline_search_result(search_payload)
+    print()
+    print_pipeline_summary_result(summary_payload)
+    print()
+    print_pipeline_save_result(save_payload)
+
+
+def print_multiline_value(label: str, text: str) -> None:
+    print(status_line(label, "", SUCCESS).rstrip())
+    rendered = render_answer(text.strip())
+    if not rendered:
+        print(indented_line("пусто", level=1))
+        return
+    for line in rendered:
+        print(f"  {line}")
 
 
 def print_scheduler_tool_call_result(
@@ -1320,6 +1457,24 @@ def build_prompt(args: argparse.Namespace) -> PromptPayload:
 
 def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
     payload = enrich_prompt_with_mcp_tool_context(normalize_prompt(prompt))
+    pipeline_request = parse_natural_pipeline_request(payload.request_text)
+    if pipeline_request is not None:
+        print()
+        print(status_line("Pipeline intent", "search -> summarize -> save", SUCCESS))
+        print(status_line("Query", pipeline_request["query"], VALUE))
+        print(status_line("File", pipeline_request["filename"], VALUE))
+        print()
+        call_pipeline_tool_from_short_command(
+            default_mcp_config_file(),
+            "run",
+            {
+                "query": pipeline_request["query"],
+                "filename": pipeline_request["filename"],
+            },
+        )
+        print()
+        return True
+
     fast_answer = agent.handle_memory_only_message(
         payload.request_text,
         history_text=payload.history_text,
@@ -1369,6 +1524,72 @@ def normalize_prompt(prompt: str | PromptPayload) -> PromptPayload:
     if isinstance(prompt, PromptPayload):
         return prompt
     return PromptPayload(request_text=prompt)
+
+
+def parse_natural_pipeline_request(text: str) -> dict[str, str] | None:
+    normalized = " ".join(text.strip().split())
+    lowered = normalized.lower()
+    if not normalized:
+        return None
+
+    has_search_intent = any(
+        marker in lowered
+        for marker in (
+            "найди",
+            "найти",
+            "поищи",
+            "search",
+            "find",
+        )
+    )
+    has_save_intent = any(
+        marker in lowered
+        for marker in (
+            "сохрани",
+            "сохранить",
+            "запиши",
+            "save",
+        )
+    )
+    if not has_search_intent or not has_save_intent:
+        return None
+
+    query = normalized
+    query = re.sub(r"^(найди|найти|поищи)\s+(мне\s+)?", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"^(search|find)\s+(for\s+)?", "", query, flags=re.IGNORECASE)
+    query = re.split(
+        r"\s+(?:и\s+)?(?:сохрани|сохранить|запиши|save)\b",
+        query,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" .,:;-")
+    if not query:
+        return None
+
+    filename = extract_pipeline_filename(normalized, query)
+    return {
+        "query": query,
+        "filename": filename,
+    }
+
+
+def extract_pipeline_filename(text: str, query: str) -> str:
+    file_match = re.search(
+        r"(?:в\s+файл|файл|to\s+file)\s+([A-Za-z0-9._-]+\.(?:md|txt))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if file_match:
+        return file_match.group(1)
+
+    notes_match = re.search(r"\b(?:в\s+заметки|заметки|notes)\b", text, flags=re.IGNORECASE)
+    if notes_match:
+        return "notes.md"
+
+    slug = re.sub(r"[^A-Za-zА-Яа-я0-9]+", "-", query.lower()).strip("-")
+    if not slug:
+        slug = "pipeline-result"
+    return f"{slug[:48]}.md"
 
 
 def enrich_prompt_with_mcp_tool_context(payload: PromptPayload) -> PromptPayload:
@@ -1570,9 +1791,11 @@ def print_help() -> None:
             ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
             ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
             ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
+            ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
             ("/mcp remind TEXT AT", "создать reminder без JSON"),
             ("/mcp run_due", "выполнить due jobs scheduler"),
             ("/mcp summary", "показать сводку scheduler"),
+            ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
@@ -2170,6 +2393,9 @@ def handle_mcp_command(argument: str) -> None:
         return
 
     short_command, _, short_argument = argument.strip().partition(" ")
+    if handle_pipeline_short_command(config_path, short_command.lower(), short_argument.strip()):
+        return
+
     if handle_scheduler_short_command(config_path, short_command.lower(), short_argument.strip()):
         return
 
@@ -2247,7 +2473,11 @@ def handle_mcp_command(argument: str) -> None:
         init_scheduler_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp show | /mcp test | /mcp help")
+    if command == "init-pipeline":
+        init_pipeline_mcp_config(config_path)
+        return
+
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp pipeline QUERY FILE | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:
