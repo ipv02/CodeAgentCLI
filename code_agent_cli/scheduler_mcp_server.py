@@ -89,6 +89,14 @@ def delete(job_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(
+    title="Clear scheduler",
+    description="Delete all scheduler jobs and run history from SQLite storage.",
+)
+def clear() -> dict[str, Any]:
+    return service().clear()
+
+
+@mcp.tool(
     title="Run due scheduler jobs",
     description="Run all scheduler jobs whose next_run_at is due and persist their results.",
 )

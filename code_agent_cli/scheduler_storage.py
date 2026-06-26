@@ -186,6 +186,16 @@ class SchedulerStorage:
             cursor = connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         return cursor.rowcount > 0
 
+    def clear(self) -> dict[str, int]:
+        self.initialize()
+        with self.connect() as connection:
+            jobs_deleted = connection.execute("DELETE FROM jobs").rowcount
+            runs_deleted = connection.execute("DELETE FROM job_runs").rowcount
+        return {
+            "jobs_deleted": max(jobs_deleted, 0),
+            "runs_deleted": max(runs_deleted, 0),
+        }
+
     def add_run(self, run: SchedulerRun) -> SchedulerRun:
         self.initialize()
         with self.connect() as connection:

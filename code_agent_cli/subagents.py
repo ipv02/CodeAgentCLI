@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -87,6 +88,187 @@ class ResponseAgent:
         messages: list[dict[str, str]],
     ) -> tuple[str, dict[str, Any]]:
         return request_fn(messages, None)
+
+
+@dataclass(frozen=True)
+class MCPToolDescriptor:
+    server: str
+    name: str
+    title: str | None = None
+    description: str | None = None
+    input_schema: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MCPOrchestrationStep:
+    server: str
+    tool: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class MCPOrchestrationPlan:
+    intent: str
+    steps: list[MCPOrchestrationStep]
+
+
+MCP_ORCHESTRATION_PROMPT = """
+Ты MCPOrchestrationAgent внутри CodeAgentCLI.
+
+Твоя задача: выбрать MCP-серверы и MCP-инструменты для длинного flow.
+Ты не выполняешь инструменты сам. Ты возвращаешь только JSON-план.
+
+Правила:
+- выбирай только tools из списка доступных tools;
+- не выдумывай server/tool names;
+- для iOS, Swift, SwiftUI и Apple platform задач предпочитай apple-mcp и cupertino, если у них есть релевантные tools;
+- для SwiftUI navigation через cupertino/search используй source "all" без framework-фильтра;
+- для SwiftUI navigation query включай слова "NavigationStack NavigationSplitView tab navigation robust navigation";
+- для web/LLM обработки и summarization используй pipeline;
+- для сохранения в "заметки" используй pipeline/save с filename "notes.md";
+- не используй Apple Notes tools для сохранения, если есть pipeline/save;
+- для reminders, due jobs и aggregated status используй scheduler;
+- если нужно передать результат предыдущего шага, используй строку "$previous_text" или "$steps[N]" в arguments;
+- "$steps[N]" поддерживает индекс шага из плана; для первого шага можно использовать "$steps[1]";
+- если передаешь summary из pipeline/summarize_text в pipeline/save, используй "$steps[N].summary";
+- для reminder "завтра" используй run_at "$tomorrow_09_utc";
+- после scheduler/remind добавь scheduler/summary, чтобы вернуть агрегированный результат;
+- делай максимум 6 шагов;
+- возвращай только JSON object без markdown.
+- обязательно верни непустой массив steps.
+
+Формат ответа:
+{
+  "intent": "краткое описание flow",
+  "steps": [
+    {
+      "server": "pipeline",
+      "tool": "run",
+      "arguments": {"query": "...", "filename": "notes.md"},
+      "reason": "зачем нужен шаг"
+    }
+  ]
+}
+""".strip()
+
+
+@dataclass
+class MCPOrchestrationAgent:
+    max_tokens: int = 2200
+
+    def run(
+        self,
+        request_fn: RequestFn,
+        user_text: str,
+        tools: list[MCPToolDescriptor],
+    ) -> tuple[MCPOrchestrationPlan, dict[str, Any]]:
+        response_text, usage = request_fn(
+            self.build_messages(user_text, tools),
+            self.max_tokens,
+        )
+        return parse_mcp_orchestration_response(response_text), usage
+
+    def build_messages(
+        self,
+        user_text: str,
+        tools: list[MCPToolDescriptor],
+    ) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": MCP_ORCHESTRATION_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "Доступные MCP tools:\n"
+                    f"{render_mcp_tool_descriptors(tools)}\n\n"
+                    f"Запрос пользователя:\n{user_text}"
+                ),
+            },
+        ]
+
+
+def render_mcp_tool_descriptors(tools: list[MCPToolDescriptor]) -> str:
+    payload = [
+        {
+            "server": tool.server,
+            "tool": tool.name,
+            "title": tool.title,
+            "description": tool.description,
+            "input": compact_mcp_input_schema(tool.input_schema),
+        }
+        for tool in tools
+    ]
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def compact_mcp_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return {}
+    compact_properties: dict[str, Any] = {}
+    for name, value in properties.items():
+        if not isinstance(value, dict):
+            compact_properties[name] = {}
+            continue
+        compact_value: dict[str, Any] = {}
+        for key in ("type", "enum", "default"):
+            if key in value:
+                compact_value[key] = value[key]
+        compact_properties[name] = compact_value
+    required = schema.get("required")
+    return {
+        "properties": compact_properties,
+        "required": required if isinstance(required, list) else [],
+    }
+
+
+def parse_mcp_orchestration_response(text: str) -> MCPOrchestrationPlan:
+    payload = extract_json_object(text)
+    if not isinstance(payload, dict):
+        raise ValueError("MCP orchestration response is not a JSON object")
+
+    intent = str(payload.get("intent") or "mcp_orchestration").strip()
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError("MCP orchestration response has empty steps")
+
+    steps: list[MCPOrchestrationStep] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, dict):
+            raise ValueError("MCP orchestration step is not an object")
+        server = str(raw_step.get("server") or "").strip()
+        tool = str(raw_step.get("tool") or "").strip()
+        arguments = raw_step.get("arguments") or {}
+        reason = str(raw_step.get("reason") or "").strip()
+        if not server or not tool:
+            raise ValueError("MCP orchestration step must contain server and tool")
+        if not isinstance(arguments, dict):
+            raise ValueError("MCP orchestration step arguments must be an object")
+        steps.append(
+            MCPOrchestrationStep(
+                server=server,
+                tool=tool,
+                arguments=arguments,
+                reason=reason,
+            )
+        )
+
+    return MCPOrchestrationPlan(intent=intent or "mcp_orchestration", steps=steps)
+
+
+def extract_json_object(text: str) -> Any:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(stripped[start : end + 1])
 
 
 @dataclass

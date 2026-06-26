@@ -312,6 +312,12 @@ summary
 /mcp summary
 ```
 
+Очистить все задачи и историю запусков scheduler:
+
+```text
+/mcp clear-scheduler
+```
+
 В выводе нужно проверить ключевые строки:
 
 ```text
@@ -429,6 +435,84 @@ Model: deepseek-v4-flash
 Saved: yes
 Path: ~/.code-agent-cli/pipeline/mcp-summary.md
 ```
+
+## MCP orchestration: multi-server flow
+
+Для длинных сценариев агент использует внутренний `MCPOrchestrationAgent`.
+Он получает список реально зарегистрированных MCP tools, строит JSON-план,
+валидирует server/tool names и выполняет шаги по порядку.
+
+Основные серверы для orchestration:
+
+```text
+apple-mcp
+cupertino
+pipeline
+scheduler
+```
+
+Подключить недостающие серверы:
+
+```text
+agent
+/mcp init-orchestration
+```
+
+Проверить, какие tools реально доступны:
+
+```text
+/mcp tools
+```
+
+Запустить длинный flow:
+
+```text
+/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Cupertino MCP, сделай сводку, сохрани в заметки и поставь напоминание проверить завтра"
+```
+
+Такой же сценарий можно запустить обычной фразой без `/mcp`:
+
+```text
+найди лучшие практики навигации SwiftUI в iOS через Cupertino MCP, сделай сводку, сохрани в заметки и поставь напоминание проверить завтра
+```
+
+Ожидаемый порядок вызовов:
+
+```text
+cupertino/search
+pipeline/summarize_text
+pipeline/save
+scheduler/remind
+scheduler/summary
+```
+
+В выводе нужно проверить:
+
+```text
+MCP Orchestration
+Flow: cupertino/search -> pipeline/summarize_text -> pipeline/save -> scheduler/remind -> scheduler/summary
+Step 1: cupertino/search
+Step 2: pipeline/summarize_text
+Step 3: pipeline/save
+Saved: ~/.code-agent-cli/pipeline/notes.md
+Step 4: scheduler/remind
+Next run: ...
+Step 5: scheduler/summary
+Active jobs: ...
+```
+
+Передача данных между tools выполняется через ссылки в плане:
+
+```text
+$previous_text
+$steps[1]
+$steps[2].summary
+$tomorrow_09_utc
+```
+
+`MCPOrchestrationAgent` только планирует. Реальное выполнение делает
+детерминированный runner через существующий MCP client, поэтому план не может
+вызвать незарегистрированный server/tool.
 
 Создать готовый config для Apple MCP и Cupertino:
 

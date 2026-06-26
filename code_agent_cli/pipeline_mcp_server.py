@@ -48,6 +48,14 @@ def summarize(search_payload: dict[str, Any], max_items: int = 5) -> dict[str, A
 
 
 @mcp.tool(
+    title="Summarize MCP text",
+    description="Summarize arbitrary text returned by another MCP tool with the configured LLM.",
+)
+def summarize_text(query: str, content: str) -> dict[str, Any]:
+    return service().summarize_text(query, content)
+
+
+@mcp.tool(
     title="Save content",
     description="Save content to the pipeline output directory.",
 )

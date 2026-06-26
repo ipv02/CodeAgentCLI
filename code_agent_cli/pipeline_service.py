@@ -151,6 +151,24 @@ class PipelineService:
             ],
         }
 
+    def summarize_text(self, query: str, content: str) -> dict[str, Any]:
+        clean_query = query.strip()
+        clean_content = content.strip()
+        if not clean_query:
+            raise PipelineError("query не должен быть пустым.")
+        if not clean_content:
+            raise PipelineError("content не должен быть пустым.")
+
+        summary = generate_text_summary(clean_query, clean_content)
+        return {
+            "query": clean_query,
+            "summary": summary["content"],
+            "model": summary["model"],
+            "usage": summary["usage"],
+            "source": "mcp_text",
+            "items_used": 1,
+        }
+
     def save(self, filename: str, content: str) -> dict[str, Any]:
         safe_name = sanitize_filename(filename)
         clean_content = content.strip()
@@ -287,6 +305,78 @@ def generate_pipeline_summary(query: str, results: list[SearchResult]) -> dict[s
 
     return {
         "content": content.strip(),
+        "model": model,
+        "usage": usage if isinstance(usage, dict) else {},
+    }
+
+
+def generate_text_summary(query: str, content: str) -> dict[str, Any]:
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise PipelineError("DEEPSEEK_API_KEY не задан.")
+
+    model = os.getenv("CODE_AGENT_MODEL", "deepseek-v4-flash")
+    api_url = os.getenv("CODE_AGENT_API_URL", "https://api.deepseek.com/chat/completions")
+    temperature = env_float("CODE_AGENT_TEMPERATURE", 0.2)
+    max_tokens = int(os.getenv("CODE_AGENT_PIPELINE_MAX_TOKENS", "900"))
+    clipped_content = content[:12000]
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты MCP pipeline agent. Суммаризируй только предоставленный "
+                    "MCP output. Не выдумывай факты, явно отмечай ограничения входных данных."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Задача: {query}\n\n"
+                    f"MCP output:\n{clipped_content}\n\n"
+                    "Сделай краткую русскоязычную сводку в 3-6 пунктах."
+                ),
+            },
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    request = Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=120, context=https_ssl_context()) as response:
+            response_text = response.read().decode("utf-8")
+    except HTTPError as error:
+        response_text = error.read().decode("utf-8")
+        raise PipelineError(f"LLM API вернул HTTP {error.code}: {response_text}") from error
+    except OSError as error:
+        raise PipelineError(f"LLM API недоступен: {error}") from error
+
+    try:
+        response_payload = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise PipelineError("LLM API вернул некорректный JSON.") from error
+
+    choices = response_payload.get("choices") or []
+    usage = response_payload.get("usage") or {}
+    if not choices:
+        raise PipelineError("LLM API не вернул choices.")
+    message = choices[0].get("message") or {}
+    summary = message.get("content")
+    if not isinstance(summary, str) or not summary.strip():
+        raise PipelineError("LLM API вернул пустой summary.")
+
+    return {
+        "content": summary.strip(),
         "model": model,
         "usage": usage if isinstance(usage, dict) else {},
     }

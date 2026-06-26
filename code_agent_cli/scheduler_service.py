@@ -121,6 +121,14 @@ class SchedulerService:
             raise SchedulerError("job_id не должен быть пустым.")
         return {"job_id": clean_job_id, "deleted": self.storage.delete_job(clean_job_id)}
 
+    def clear(self) -> dict[str, Any]:
+        deleted = self.storage.clear()
+        return {
+            "cleared": True,
+            "jobs_deleted": deleted["jobs_deleted"],
+            "runs_deleted": deleted["runs_deleted"],
+        }
+
     def run_due_jobs(self, *, limit: int = 20) -> dict[str, Any]:
         if limit < 1:
             raise SchedulerError("limit должен быть положительным числом.")

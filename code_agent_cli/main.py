@@ -13,6 +13,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -34,6 +35,7 @@ from code_agent_cli.mcp_config import (
     MCPServerConfig,
     add_mcp_server,
     clear_mcp_servers,
+    default_apple_mcp_config_payload,
     default_mcp_config_file,
     load_mcp_config,
     load_mcp_config_or_empty,
@@ -46,6 +48,11 @@ from code_agent_cli.mcp_client import (
     MCPToolCallResult,
     call_mcp_tool,
     list_mcp_tools,
+)
+from code_agent_cli.subagents import (
+    MCPOrchestrationPlan,
+    MCPOrchestrationStep,
+    MCPToolDescriptor,
 )
 from code_agent_cli.tokens import TokenBreakdown
 
@@ -142,6 +149,31 @@ class MCPServerCheck:
     @property
     def ok(self) -> bool:
         return self.error is None
+
+
+@dataclass(frozen=True)
+class MCPOrchestrationToolCatalog:
+    tools: list[MCPToolDescriptor]
+    checks: list[MCPServerCheck]
+
+
+@dataclass(frozen=True)
+class MCPOrchestrationStepResult:
+    index: int
+    step: MCPOrchestrationStep
+    arguments: dict[str, Any]
+    result: MCPToolCallResult | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and self.result is not None and not self.result.is_error
+
+
+@dataclass(frozen=True)
+class MCPOrchestrationRunResult:
+    plan: MCPOrchestrationPlan
+    steps: list[MCPOrchestrationStepResult]
 
 
 def main() -> None:
@@ -419,10 +451,13 @@ def print_mcp_help() -> None:
             ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
             ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
             ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
+            ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
             ("/mcp remind TEXT AT", "создать reminder без JSON"),
             ("/mcp run_due", "выполнить due jobs"),
             ("/mcp summary", "показать сводку scheduler"),
+            ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
             ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
+            ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
@@ -433,10 +468,13 @@ def print_mcp_help() -> None:
     print(indented_line('/mcp init-mock', level=2))
     print(indented_line('/mcp init-scheduler', level=2))
     print(indented_line('/mcp init-pipeline', level=2))
+    print(indented_line('/mcp init-orchestration', level=2))
     print(indented_line('/mcp remind "Проверить планировщик" 2026-06-24T12:30:00Z', level=2))
     print(indented_line("/mcp run_due", level=2))
     print(indented_line("/mcp summary", level=2))
+    print(indented_line("/mcp clear-scheduler", level=2))
     print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
+    print(indented_line('/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сохрани в заметки и поставь напоминание проверить завтра"', level=2))
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
     print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
     print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
@@ -630,6 +668,84 @@ def init_pipeline_mcp_config(config_path: Path) -> None:
     print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
 
 
+def init_orchestration_mcp_config(config_path: Path) -> None:
+    try:
+        existing_config = load_mcp_config_or_empty(config_path)
+    except MCPConfigError as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    apple_payload = default_apple_mcp_config_payload()["mcpServers"]
+    servers = [
+        MCPServerConfig(
+            name="apple-mcp",
+            command=str(apple_payload["apple-mcp"]["command"]),
+            args=list(apple_payload["apple-mcp"]["args"]),
+        ),
+        MCPServerConfig(
+            name="cupertino",
+            command=str(apple_payload["cupertino"]["command"]),
+            args=list(apple_payload["cupertino"]["args"]),
+        ),
+        MCPServerConfig(
+            name="scheduler",
+            command=sys.executable,
+            args=["-m", "code_agent_cli.scheduler_mcp_server"],
+            env=scheduler_env_from_process(),
+        ),
+        MCPServerConfig(
+            name="pipeline",
+            command=sys.executable,
+            args=["-m", "code_agent_cli.pipeline_mcp_server"],
+            env=pipeline_env_from_process(),
+        ),
+    ]
+
+    saved_path: Path | None = existing_config.path
+    existing_names = {server.name for server in existing_config.servers}
+    added_servers: list[MCPServerConfig] = []
+    for server in servers:
+        if server.name in existing_names:
+            continue
+        try:
+            saved_path = add_mcp_server(config_path, server)
+            added_servers.append(server)
+        except MCPConfigError as error:
+            print(f"Ошибка MCP config: {error}", file=sys.stderr)
+            return
+        except OSError as error:
+            print(f"Ошибка MCP config: {error}", file=sys.stderr)
+            return
+
+    print(header_line("MCP"))
+    print(status_line("Orchestration servers", "подключены", SUCCESS))
+    print(status_line("Конфиг", str(saved_path or config_path), VALUE))
+    for server in servers:
+        state = "registered" if server.name in {item.name for item in added_servers} else "existing"
+        print(status_line(server.name, state, VALUE))
+    print()
+    print(indented_line("Проверить tools:"))
+    print(indented_line("/mcp tools", level=2))
+    print(indented_line("Запустить длинный flow:"))
+    print(indented_line('/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сделай сводку, сохрани в заметки и поставь напоминание проверить завтра"', level=2))
+
+
+def scheduler_env_from_process() -> dict[str, str]:
+    scheduler_env = {}
+    scheduler_db = os.getenv("CODE_AGENT_SCHEDULER_DB")
+    if scheduler_db:
+        scheduler_env["CODE_AGENT_SCHEDULER_DB"] = scheduler_db
+    return scheduler_env
+
+
+def pipeline_env_from_process() -> dict[str, str]:
+    pipeline_env = {}
+    pipeline_dir = os.getenv("CODE_AGENT_PIPELINE_DIR")
+    if pipeline_dir:
+        pipeline_env["CODE_AGENT_PIPELINE_DIR"] = pipeline_dir
+    return pipeline_env
+
+
 def call_mcp_tool_from_command(config_path: Path, argument: str) -> None:
     parts = argument.split(maxsplit=3)
     if len(parts) < 3 or parts[0] != "call":
@@ -716,6 +832,276 @@ def call_mcp_tool_from_values(
     print_mcp_tool_call_result(server_name, tool_name, result)
 
 
+def run_mcp_orchestration_from_command(agent: CodeAgent, argument: str) -> None:
+    request = argument.strip()
+    if not request:
+        print('Использование: /mcp orchestrate "запрос для длинного MCP flow"')
+        return
+
+    try:
+        with loader("Смотрю MCP tools"):
+            config = load_mcp_config(default_mcp_config_file())
+            catalog = load_mcp_orchestration_catalog(config)
+    except MCPConfigError as error:
+        print_mcp_config_missing(default_mcp_config_file(), error)
+        return
+
+    if not catalog.tools:
+        print("Ошибка MCP orchestration: нет доступных tools.", file=sys.stderr)
+        return
+
+    try:
+        with loader("Планирую MCP orchestration"):
+            plan = agent.plan_mcp_orchestration(request, catalog.tools)
+        plan = normalize_mcp_orchestration_plan(plan)
+        print()
+        print_mcp_orchestration_plan(plan)
+        print()
+        run_result = run_mcp_orchestration_plan(config, catalog, plan)
+    except MissingAPIKeyError as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return
+    except Exception as error:
+        print(f"Ошибка MCP orchestration: {error}", file=sys.stderr)
+        return
+
+    print_mcp_orchestration_result(run_result)
+
+
+def load_mcp_orchestration_catalog(config: MCPConfig) -> MCPOrchestrationToolCatalog:
+    preferred_servers = {"apple-mcp", "cupertino", "pipeline", "scheduler"}
+    checks = [
+        check_mcp_server(server, env_float("CODE_AGENT_MCP_TIMEOUT", 30.0))
+        for server in config.servers
+        if server.name in preferred_servers
+    ]
+    tools: list[MCPToolDescriptor] = []
+    for check in checks:
+        if not check.ok:
+            continue
+        for tool in check.tools:
+            tools.append(
+                MCPToolDescriptor(
+                    server=check.server.name,
+                    name=tool.name,
+                    title=tool.title,
+                    description=tool.description,
+                    input_schema=tool.input_schema,
+                )
+            )
+    return MCPOrchestrationToolCatalog(tools=tools, checks=checks)
+
+
+def run_mcp_orchestration_plan(
+    config: MCPConfig,
+    catalog: MCPOrchestrationToolCatalog,
+    plan: MCPOrchestrationPlan,
+) -> MCPOrchestrationRunResult:
+    validate_mcp_orchestration_plan(catalog, plan)
+    step_results: list[MCPOrchestrationStepResult] = []
+
+    for index, step in enumerate(plan.steps, start=1):
+        server = find_mcp_server(config, step.server)
+        if server is None:
+            step_results.append(
+                MCPOrchestrationStepResult(
+                    index=index,
+                    step=step,
+                    arguments=step.arguments,
+                    error=f"server не найден: {step.server}",
+                )
+            )
+            break
+
+        arguments = resolve_mcp_orchestration_arguments(step.arguments, step_results)
+        try:
+            with loader(f"Step {index}: {step.server}/{step.tool}"):
+                result = asyncio.run(
+                    call_mcp_tool(
+                        server.command,
+                        server.args,
+                        step.tool,
+                        arguments,
+                        cwd=server.cwd,
+                        env=server.env,
+                        timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+                    )
+                )
+        except Exception as error:
+            step_results.append(
+                MCPOrchestrationStepResult(
+                    index=index,
+                    step=step,
+                    arguments=arguments,
+                    error=str(error),
+                )
+            )
+            break
+
+        step_results.append(
+            MCPOrchestrationStepResult(
+                index=index,
+                step=step,
+                arguments=arguments,
+                result=result,
+                error=compact_text(result.as_text(), max_length=500) if result.is_error else None,
+            )
+        )
+        if result.is_error:
+            break
+
+    return MCPOrchestrationRunResult(plan=plan, steps=step_results)
+
+
+def normalize_mcp_orchestration_plan(plan: MCPOrchestrationPlan) -> MCPOrchestrationPlan:
+    steps: list[MCPOrchestrationStep] = []
+    for step in plan.steps:
+        steps.append(normalize_mcp_orchestration_step(step, steps))
+    return MCPOrchestrationPlan(
+        intent=plan.intent,
+        steps=steps,
+    )
+
+
+def normalize_mcp_orchestration_step(
+    step: MCPOrchestrationStep,
+    previous_steps: list[MCPOrchestrationStep],
+) -> MCPOrchestrationStep:
+    if step.server == "pipeline" and step.tool == "summarize":
+        previous_step = previous_steps[-1] if previous_steps else None
+        if previous_step is not None and previous_step.server != "pipeline":
+            arguments = dict(step.arguments)
+            return MCPOrchestrationStep(
+                server="pipeline",
+                tool="summarize_text",
+                arguments={
+                    "query": str(arguments.get("query") or "Сделай краткую сводку результата предыдущего MCP tool"),
+                    "content": "$previous_text",
+                },
+                reason=step.reason or "Суммаризация текста из предыдущего MCP tool",
+            )
+
+    if step.server == "pipeline" and step.tool == "save":
+        arguments = dict(step.arguments)
+        content = arguments.get("content")
+        previous_step = previous_steps[-1] if previous_steps else None
+        if (
+            previous_step is not None
+            and previous_step.server == "pipeline"
+            and previous_step.tool in {"summarize", "summarize_text"}
+            and isinstance(content, str)
+            and re.fullmatch(r"\$steps\[\d+]", content)
+        ):
+            arguments["content"] = f"{content}.summary"
+            return MCPOrchestrationStep(
+                server=step.server,
+                tool=step.tool,
+                arguments=arguments,
+                reason=step.reason,
+            )
+
+    if step.server != "cupertino" or step.tool != "search":
+        return step
+
+    arguments = dict(step.arguments)
+    query = str(arguments.get("query") or "")
+    lowered = query.lower()
+    if "swiftui" in lowered and any(marker in lowered for marker in ("navigation", "navigationstack", "навигац")):
+        arguments["query"] = (
+            "SwiftUI NavigationStack NavigationSplitView tab navigation "
+            "robust navigation best practices"
+        )
+        arguments["source"] = "all"
+        arguments["limit"] = int(arguments.get("limit") or 10)
+        arguments.pop("framework", None)
+
+    return MCPOrchestrationStep(
+        server=step.server,
+        tool=step.tool,
+        arguments=arguments,
+        reason=step.reason,
+    )
+
+
+def validate_mcp_orchestration_plan(
+    catalog: MCPOrchestrationToolCatalog,
+    plan: MCPOrchestrationPlan,
+) -> None:
+    if len(plan.steps) > 6:
+        raise ValueError("план содержит больше 6 шагов")
+    allowed = {(tool.server, tool.name) for tool in catalog.tools}
+    for step in plan.steps:
+        if (step.server, step.tool) not in allowed:
+            raise ValueError(f"tool не найден в catalog: {step.server}/{step.tool}")
+        if not isinstance(step.arguments, dict):
+            raise ValueError(f"arguments должны быть object: {step.server}/{step.tool}")
+
+
+def resolve_mcp_orchestration_arguments(
+    value: Any,
+    step_results: list[MCPOrchestrationStepResult],
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: resolve_mcp_orchestration_arguments(item, step_results)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [resolve_mcp_orchestration_arguments(item, step_results) for item in value]
+    if isinstance(value, str):
+        return resolve_mcp_orchestration_reference(value, step_results)
+    return value
+
+
+def resolve_mcp_orchestration_reference(
+    value: str,
+    step_results: list[MCPOrchestrationStepResult],
+) -> Any:
+    if value == "$tomorrow_09_utc":
+        return tomorrow_utc_at(9).isoformat().replace("+00:00", "Z")
+    if value == "$previous_text":
+        return step_results[-1].result.as_text() if step_results and step_results[-1].result else ""
+    match = re.fullmatch(r"\$steps\[(\d+)](?:\.(.+))?", value)
+    if not match:
+        return value
+
+    step_index = int(match.group(1))
+    if step_index >= len(step_results) and 1 <= step_index <= len(step_results):
+        step_index -= 1
+    if step_index < 0 or step_index >= len(step_results):
+        return ""
+    result = step_results[step_index].result
+    if result is None:
+        return ""
+    path = match.group(2)
+    if not path:
+        return result.as_text()
+    payload: Any = result.structured_content
+    if payload is None:
+        try:
+            payload = json.loads(result.as_text())
+        except json.JSONDecodeError:
+            return result.as_text()
+    for part in path.split("."):
+        if isinstance(payload, dict):
+            payload = payload.get(part)
+        elif isinstance(payload, list) and part.isdigit():
+            index = int(part)
+            payload = payload[index] if 0 <= index < len(payload) else None
+        else:
+            payload = None
+        if payload is None:
+            return ""
+    if isinstance(payload, (dict, list)):
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    return payload
+
+
+def tomorrow_utc_at(hour: int) -> datetime:
+    tomorrow = datetime.now(timezone.utc).date() + timedelta(days=1)
+    return datetime.combine(tomorrow, datetime_time(hour=hour, tzinfo=timezone.utc))
+
+
 def mcp_loader_label(server_name: str, tool_name: str) -> str:
     if server_name == "pipeline" and tool_name == "run":
         return "Выполняю MCP pipeline"
@@ -759,6 +1145,10 @@ def handle_scheduler_short_command(config_path: Path, command: str, argument: st
             print("Использование: /mcp summary [LIMIT]")
             return True
         call_scheduler_tool_from_short_command(config_path, "summary", tool_arguments)
+        return True
+
+    if command in {"clear-scheduler", "scheduler-clear", "clear_scheduler"}:
+        call_scheduler_tool_from_short_command(config_path, "clear", {})
         return True
 
     if command == "health":
@@ -967,6 +1357,122 @@ def print_multiline_value(label: str, text: str) -> None:
         print(f"  {line}")
 
 
+def print_mcp_orchestration_result(run_result: MCPOrchestrationRunResult) -> None:
+    print(header_line("MCP Orchestration"))
+    print(status_line("Intent", run_result.plan.intent, SUCCESS))
+    servers = " -> ".join(f"{step.step.server}/{step.step.tool}" for step in run_result.steps)
+    print(status_line("Flow", servers or "нет шагов", VALUE))
+    print()
+    for step_result in run_result.steps:
+        print(
+            colorize(
+                f"Step {step_result.index}: {step_result.step.server}/{step_result.step.tool}",
+                BOLD + ACCENT,
+            )
+        )
+        print(status_line("Status", "OK" if step_result.ok else "Error", SUCCESS if step_result.ok else ERROR))
+        if step_result.error:
+            print(status_line("Error", step_result.error, ERROR))
+        elif step_result.result is not None:
+            print_mcp_orchestration_step_payload(step_result)
+        print()
+
+
+def print_mcp_orchestration_plan(plan: MCPOrchestrationPlan) -> None:
+    print(header_line("MCP Orchestration plan"))
+    print(status_line("Intent", plan.intent, SUCCESS))
+    flow = " -> ".join(f"{step.server}/{step.tool}" for step in plan.steps)
+    print(status_line("Flow", flow or "нет шагов", VALUE))
+    for index, step in enumerate(plan.steps, start=1):
+        print(status_line(f"Step {index}", f"{step.server}/{step.tool}", VALUE))
+
+
+def print_mcp_orchestration_step_payload(step_result: MCPOrchestrationStepResult) -> None:
+    result = step_result.result
+    if result is None:
+        return
+    payload = parse_mcp_json_result(result)
+    if step_result.step.server == "pipeline" and step_result.step.tool == "run" and payload:
+        save_payload = payload.get("save") if isinstance(payload.get("save"), dict) else {}
+        summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        print(status_line("Saved", str(save_payload.get("path", "")), SUCCESS))
+        print_multiline_value("Summary", str(summary_payload.get("summary", "")))
+        return
+    if step_result.step.server == "pipeline" and step_result.step.tool in {"summarize", "summarize_text"} and payload:
+        print_multiline_value("Summary", str(payload.get("summary", "")))
+        return
+    if step_result.step.server == "pipeline" and step_result.step.tool == "save" and payload:
+        print(status_line("Saved", str(payload.get("path", "")), SUCCESS))
+        return
+    if step_result.step.server == "cupertino" and step_result.step.tool == "search":
+        print_mcp_orchestration_search_result(result.as_text())
+        return
+    if step_result.step.server == "scheduler" and step_result.step.tool == "remind" and payload:
+        print(status_line("Reminder", str(payload.get("title") or payload.get("text") or "created"), SUCCESS))
+        print(status_line("Next run", str(payload.get("next_run_at", "")), VALUE))
+        return
+    if step_result.step.server == "scheduler" and step_result.step.tool == "summary" and payload:
+        active_jobs = payload.get("active_jobs", 0)
+        recent_runs = len(ensure_list(payload.get("recent_runs")))
+        print(status_line("Scheduler summary", f"{active_jobs} active jobs, {recent_runs} recent runs", SUCCESS))
+        print(status_line("Reminder", "saved and visible in scheduler", SUCCESS))
+        return
+
+    text = result.as_text()
+    if len(text) > 1200:
+        text = f"{text[:1200].rstrip()}\n..."
+    print_multiline_value("Result", text)
+
+
+def print_mcp_orchestration_search_result(text: str) -> None:
+    count_match = re.search(r"(?:Total:\s*)?(\d+)\s+results?", text, re.IGNORECASE)
+    found = count_match.group(1) if count_match else "some"
+    print(status_line("Search", f"{found} results from Cupertino", SUCCESS))
+
+    interesting_lines = [
+        line.strip(" -")
+        for line in text.splitlines()
+        if line.strip().startswith("- **")
+    ][:3]
+    if interesting_lines:
+        print(status_line("Top", "; ".join(interesting_lines), VALUE))
+
+
+def compact_text(text: str, *, max_length: int) -> str:
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[:max_length].rstrip()}..."
+
+
+def print_compact_json_value(label: str, value: Any, *, max_length: int = 280) -> None:
+    compacted = compact_large_json_values(value, max_length=max_length)
+    text = json.dumps(compacted, ensure_ascii=False, indent=2)
+    print(status_line(label, "", SUCCESS).rstrip())
+    for line in text.splitlines():
+        wrapped_lines = textwrap.wrap(
+            line,
+            width=terminal_text_width(),
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [line]
+        for wrapped_line in wrapped_lines:
+            print(colorize(f"  {wrapped_line}", VALUE))
+
+
+def compact_large_json_values(value: Any, *, max_length: int) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: compact_large_json_values(item, max_length=max_length)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [compact_large_json_values(item, max_length=max_length) for item in value]
+    if isinstance(value, str) and len(value) > max_length:
+        return f"{value[:max_length].rstrip()}..."
+    return value
+
+
 def print_scheduler_tool_call_result(
     server_name: str,
     tool_name: str,
@@ -995,6 +1501,11 @@ def print_scheduler_tool_call_result(
         print(status_line("Job", str(payload.get("job_id", "")), VALUE))
         deleted = bool(payload.get("deleted"))
         print(status_line("Удален", "да" if deleted else "нет", SUCCESS if deleted else WARNING))
+        return True
+    if tool_name == "clear":
+        print(status_line("Scheduler", "cleared", SUCCESS))
+        print(status_line("Jobs deleted", str(payload.get("jobs_deleted", 0)), VALUE))
+        print(status_line("Runs deleted", str(payload.get("runs_deleted", 0)), VALUE))
         return True
     if tool_name == "health":
         print(status_line("Состояние", str(payload.get("status", "")), SUCCESS))
@@ -1422,7 +1933,7 @@ def run_interactive_session(agent: CodeAgent) -> None:
             continue
 
         if command == "/mcp":
-            handle_mcp_command(argument)
+            handle_mcp_command(agent, argument)
             continue
 
         if warn_bare_scheduler_tool(text):
@@ -1457,6 +1968,12 @@ def build_prompt(args: argparse.Namespace) -> PromptPayload:
 
 def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
     payload = enrich_prompt_with_mcp_tool_context(normalize_prompt(prompt))
+    if is_natural_mcp_orchestration_request(payload.request_text):
+        print()
+        run_mcp_orchestration_from_command(agent, payload.request_text)
+        print()
+        return True
+
     pipeline_request = parse_natural_pipeline_request(payload.request_text)
     if pipeline_request is not None:
         print()
@@ -1518,6 +2035,17 @@ def send(agent: CodeAgent, prompt: str | PromptPayload) -> bool:
     print_last_token_report(agent)
     print()
     return True
+
+
+def is_natural_mcp_orchestration_request(text: str) -> bool:
+    lowered = " ".join(text.strip().lower().split())
+    if not lowered:
+        return False
+    has_search = any(marker in lowered for marker in ("найди", "найти", "поищи", "search", "find"))
+    has_save = any(marker in lowered for marker in ("сохрани", "сохранить", "запиши", "save", "заметки"))
+    has_schedule = any(marker in lowered for marker in ("напомин", "remind", "проверить завтра", "завтра"))
+    has_mcp_scope = any(marker in lowered for marker in ("apple", "cupertino", "swiftui", "ios", "mcp"))
+    return has_search and has_save and has_schedule and has_mcp_scope
 
 
 def normalize_prompt(prompt: str | PromptPayload) -> PromptPayload:
@@ -1792,10 +2320,13 @@ def print_help() -> None:
             ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
             ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
             ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
+            ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
             ("/mcp remind TEXT AT", "создать reminder без JSON"),
             ("/mcp run_due", "выполнить due jobs scheduler"),
             ("/mcp summary", "показать сводку scheduler"),
+            ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
             ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
+            ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
@@ -2384,7 +2915,7 @@ def handle_branch_command(agent: CodeAgent, argument: str) -> None:
     )
 
 
-def handle_mcp_command(argument: str) -> None:
+def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
     command = argument.strip().lower()
     config_path = default_mcp_config_file()
 
@@ -2397,6 +2928,10 @@ def handle_mcp_command(argument: str) -> None:
         return
 
     if handle_scheduler_short_command(config_path, short_command.lower(), short_argument.strip()):
+        return
+
+    if short_command.lower() in {"orchestrate", "orchestration"}:
+        run_mcp_orchestration_from_command(agent, short_argument)
         return
 
     if command.startswith("add "):
@@ -2477,7 +3012,11 @@ def handle_mcp_command(argument: str) -> None:
         init_pipeline_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp pipeline QUERY FILE | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp show | /mcp test | /mcp help")
+    if command == "init-orchestration":
+        init_orchestration_mcp_config(config_path)
+        return
+
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

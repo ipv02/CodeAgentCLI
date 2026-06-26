@@ -33,6 +33,9 @@ from code_agent_cli.memory import (
 )
 from code_agent_cli.storage import HistoryStorage, default_history_file
 from code_agent_cli.subagents import (
+    MCPOrchestrationAgent,
+    MCPOrchestrationPlan,
+    MCPToolDescriptor,
     SYSTEM_PROMPT,
     MemoryAgent,
     ResponseAgent,
@@ -181,6 +184,7 @@ class CodeAgent:
         self.memory_agent = MemoryAgent(max_tokens=self.memory_max_tokens)
         self.task_state_agent = TaskStateAgent()
         self.invariant_agent = InvariantAgent()
+        self.mcp_orchestration_agent = MCPOrchestrationAgent()
         self.history_loaded = False
         self.invariants = self.invariant_storage.load()
         self.branches: dict[str, BranchState] = {}
@@ -368,6 +372,25 @@ class CodeAgent:
         self.last_invariant_error = ""
         self.last_task_transition_error = ""
         self.reset_history()
+
+    def plan_mcp_orchestration(
+        self,
+        user_text: str,
+        tools: list[MCPToolDescriptor],
+    ) -> MCPOrchestrationPlan:
+        if not self.api_key:
+            raise MissingAPIKeyError(
+                'Не задан DEEPSEEK_API_KEY. Выполните: export DEEPSEEK_API_KEY="ваш_ключ"'
+            )
+
+        plan, usage = self.mcp_orchestration_agent.run(
+            self._perform_request,
+            user_text,
+            tools,
+        )
+        self.token_usage.add(usage)
+        self.last_actual_usage = usage
+        return plan
 
     @property
     def memory(self) -> MemoryState:
