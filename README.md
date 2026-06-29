@@ -186,6 +186,44 @@ agent --mcp-config-tools
 /mcp help
 ```
 
+### Локальная индексация документов через Ollama
+
+Pipeline MCP умеет строить локальный индекс документов для RAG-сценариев:
+README, Markdown/TXT/RST, Python-код, JSON/YAML/TOML и PDF при установленном
+`pypdf`.
+
+Перед индексацией запустите Ollama и скачайте embedding-модель:
+
+```bash
+ollama serve
+ollama pull nomic-embed-text
+```
+
+Подключить pipeline MCP и построить индекс проекта:
+
+```text
+agent
+/mcp init-pipeline
+/mcp index-docs .
+/mcp index-status
+/mcp compare-chunking
+```
+
+Индекс сохраняется локально:
+
+```text
+~/.code-agent-cli/pipeline/document_index.db
+~/.code-agent-cli/pipeline/document_index_report.json
+```
+
+Для каждого чанка сохраняются embedding-вектор Ollama и метаданные:
+`source`, `title`, `section`, `chunk_id`, `strategy`, `start_char`, `end_char`.
+Отчет сравнивает две стратегии chunking: фиксированный размер и структурное
+разбиение по заголовкам, файлам, классам и функциям. Размер чанка задается
+в токенах: по умолчанию `700` токенов на чанк и `80` токенов overlap.
+Допустимые значения: `chunk_size` от `500` до `1000`, `overlap` от `50` до
+`100`.
+
 ## Встроенный mock HTTP API MCP
 
 Для первого собственного MCP-инструмента в проекте есть встроенный stdio-сервер

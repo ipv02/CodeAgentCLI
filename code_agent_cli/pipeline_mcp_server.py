@@ -71,6 +71,43 @@ def run(query: str, filename: str, limit: int = 5) -> dict[str, Any]:
     return service().run(query, filename, limit=limit)
 
 
+@mcp.tool(
+    title="Index local documents",
+    description=(
+        "Build a local SQLite document index with Ollama embeddings, metadata, "
+        "and fixed plus structural chunking comparison."
+    ),
+)
+def index_documents(
+    path: str,
+    chunk_size: int = 700,
+    overlap: int = 80,
+    max_files: int = 80,
+) -> dict[str, Any]:
+    return service().index_documents(
+        path,
+        chunk_size=chunk_size,
+        overlap=overlap,
+        max_files=max_files,
+    )
+
+
+@mcp.tool(
+    title="Document index status",
+    description="Return status and aggregate counts for the local document index.",
+)
+def index_status() -> dict[str, Any]:
+    return service().index_status()
+
+
+@mcp.tool(
+    title="Compare chunking strategies",
+    description="Return the saved comparison between fixed-size and structural chunking.",
+)
+def compare_chunking() -> dict[str, Any]:
+    return service().compare_chunking()
+
+
 def main() -> None:
     mcp.run()
 

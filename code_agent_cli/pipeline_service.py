@@ -12,6 +12,7 @@ from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 from code_agent_cli.agent import env_float, https_ssl_context
+from code_agent_cli.document_index import DocumentIndexService
 
 
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
@@ -197,6 +198,27 @@ class PipelineService:
             "summary": summary_payload,
             "save": save_payload,
         }
+
+    def index_documents(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 700,
+        overlap: int = 80,
+        max_files: int = 80,
+    ) -> dict[str, Any]:
+        return DocumentIndexService().index_path(
+            path,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            max_files=max_files,
+        )
+
+    def index_status(self) -> dict[str, Any]:
+        return DocumentIndexService().status()
+
+    def compare_chunking(self) -> dict[str, Any]:
+        return DocumentIndexService().compare_chunking()
 
 
 def parse_duckduckgo_html(html: str, *, limit: int) -> list[SearchResult]:

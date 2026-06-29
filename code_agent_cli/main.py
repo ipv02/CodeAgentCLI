@@ -457,6 +457,9 @@ def print_mcp_help() -> None:
             ("/mcp summary", "показать сводку scheduler"),
             ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
             ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
+            ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
+            ("/mcp index-status", "показать статус локального индекса документов"),
+            ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
             ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
@@ -474,6 +477,8 @@ def print_mcp_help() -> None:
     print(indented_line("/mcp summary", level=2))
     print(indented_line("/mcp clear-scheduler", level=2))
     print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
+    print(indented_line("/mcp index-docs .", level=2))
+    print(indented_line("/mcp compare-chunking", level=2))
     print(indented_line('/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сохрани в заметки и поставь напоминание проверить завтра"', level=2))
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
     print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
@@ -666,6 +671,10 @@ def init_pipeline_mcp_config(config_path: Path) -> None:
     print()
     print(indented_line("Запустить pipeline:"))
     print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
+    print()
+    print(indented_line("Построить локальный индекс документов через Ollama:"))
+    print(indented_line("/mcp index-docs .", level=2))
+    print(indented_line("/mcp compare-chunking", level=2))
 
 
 def init_orchestration_mcp_config(config_path: Path) -> None:
@@ -816,7 +825,7 @@ def call_mcp_tool_from_values(
                     tool_arguments,
                     cwd=server.cwd,
                     env=server.env,
-                    timeout=env_float("CODE_AGENT_MCP_TIMEOUT", 30.0),
+                    timeout=mcp_tool_timeout(server_name, tool_name),
                 )
             )
     except FileNotFoundError:
@@ -1105,9 +1114,16 @@ def tomorrow_utc_at(hour: int) -> datetime:
 def mcp_loader_label(server_name: str, tool_name: str) -> str:
     if server_name == "pipeline" and tool_name == "run":
         return "Выполняю MCP pipeline"
+    if server_name == "pipeline" and tool_name == "index_documents":
+        return "Индексирую документы через Ollama"
     if server_name == "pipeline":
         return f"Выполняю pipeline/{tool_name}"
     return f"Выполняю MCP {server_name}/{tool_name}"
+
+
+def mcp_tool_timeout(server_name: str, tool_name: str) -> float:
+    default_timeout = 300.0 if server_name == "pipeline" and tool_name == "index_documents" else 30.0
+    return env_float("CODE_AGENT_MCP_TIMEOUT", default_timeout)
 
 
 def handle_scheduler_short_command(config_path: Path, command: str, argument: str) -> bool:
@@ -1159,6 +1175,25 @@ def handle_scheduler_short_command(config_path: Path, command: str, argument: st
 
 
 def handle_pipeline_short_command(config_path: Path, command: str, argument: str) -> bool:
+    if command == "index-docs":
+        path = argument.strip() or "."
+        call_pipeline_tool_from_short_command(
+            config_path,
+            "index_documents",
+            {
+                "path": path,
+            },
+        )
+        return True
+
+    if command in {"index-status", "docs-index-status"}:
+        call_pipeline_tool_from_short_command(config_path, "index_status", {})
+        return True
+
+    if command in {"compare-chunking", "chunking"}:
+        call_pipeline_tool_from_short_command(config_path, "compare_chunking", {})
+        return True
+
     if command != "pipeline":
         return False
 
@@ -1295,6 +1330,15 @@ def print_pipeline_tool_call_result(
     if tool_name == "run":
         print_pipeline_run_result(payload)
         return True
+    if tool_name == "index_documents":
+        print_document_index_result(payload)
+        return True
+    if tool_name == "index_status":
+        print_document_index_status(payload)
+        return True
+    if tool_name == "compare_chunking":
+        print_document_chunking_comparison(payload)
+        return True
     if tool_name == "health":
         print(status_line("Состояние", str(payload.get("status", "")), SUCCESS))
         print(status_line("Output dir", str(payload.get("output_dir", "")), VALUE))
@@ -1345,6 +1389,73 @@ def print_pipeline_run_result(payload: dict[str, Any]) -> None:
     print_pipeline_summary_result(summary_payload)
     print()
     print_pipeline_save_result(save_payload)
+
+
+def print_document_index_result(payload: dict[str, Any]) -> None:
+    documents = payload.get("documents") if isinstance(payload.get("documents"), dict) else {}
+    chunks = payload.get("chunks") if isinstance(payload.get("chunks"), dict) else {}
+    embedding = payload.get("embedding") if isinstance(payload.get("embedding"), dict) else {}
+
+    print(colorize("Document index", BOLD + ACCENT))
+    print(status_line("Status", "OK", SUCCESS))
+    print(status_line("Root", str(payload.get("root", "")), VALUE))
+    print(status_line("SQLite", str(payload.get("db_path", "")), VALUE))
+    print(status_line("Report", str(payload.get("report_path", "")), VALUE))
+    print(status_line("Embedding", f"{embedding.get('provider', '')}/{embedding.get('model', '')}", VALUE))
+    print(status_line("Documents", str(documents.get("count", 0)), SUCCESS))
+    print(status_line("Estimated pages", str(documents.get("estimated_pages", 0)), VALUE))
+    print(status_line("Chunks", str(chunks.get("total", 0)), SUCCESS))
+    print(status_line("Chunk target", f"{chunks.get('target_size_tokens', '')} tokens", VALUE))
+    print(status_line("Overlap", f"{chunks.get('overlap_tokens', '')} tokens", VALUE))
+    print()
+    print_document_chunking_comparison(payload)
+
+
+def print_document_index_status(payload: dict[str, Any]) -> None:
+    print(colorize("Document index status", BOLD + ACCENT))
+    if not payload.get("exists"):
+        print(status_line("Status", "index not found", WARNING))
+        print(status_line("SQLite", str(payload.get("db_path", "")), VALUE))
+        print(indented_line("Создать индекс: /mcp index-docs .", level=1))
+        return
+
+    print(status_line("Status", "OK", SUCCESS))
+    print(status_line("Root", str(payload.get("root", "")), VALUE))
+    print(status_line("SQLite", str(payload.get("db_path", "")), VALUE))
+    print(status_line("Report", str(payload.get("report_path", "")), VALUE))
+    print(status_line("Model", str(payload.get("model", "")), VALUE))
+    print(status_line("Sources", str(payload.get("sources", 0)), SUCCESS))
+    print(status_line("Chunks", str(payload.get("chunks", 0)), SUCCESS))
+    by_strategy = payload.get("by_strategy")
+    if isinstance(by_strategy, dict):
+        for strategy, count in by_strategy.items():
+            print(status_line(f"Strategy {strategy}", str(count), VALUE))
+
+
+def print_document_chunking_comparison(payload: dict[str, Any]) -> None:
+    chunks = payload.get("chunks") if isinstance(payload.get("chunks"), dict) else {}
+    strategies = chunks.get("strategies") if isinstance(chunks.get("strategies"), dict) else {}
+    comparison = payload.get("comparison") if isinstance(payload.get("comparison"), dict) else {}
+
+    print(colorize("Chunking comparison", BOLD + ACCENT))
+    if not strategies:
+        print(status_line("Status", "нет данных сравнения", WARNING))
+        return
+
+    for name in ("fixed", "structural"):
+        stats = strategies.get(name)
+        if not isinstance(stats, dict):
+            continue
+        print(status_line(f"{name} chunks", str(stats.get("chunks", 0)), SUCCESS))
+        print(status_line(f"{name} avg tokens", str(stats.get("avg_tokens", 0)), VALUE))
+        print(status_line(f"{name} sections", str(stats.get("sections", 0)), VALUE))
+
+    if comparison:
+        print()
+        for key in ("fixed", "structural", "chunk_count_delta", "section_coverage"):
+            value = comparison.get(key)
+            if value:
+                print_multiline_value(key, str(value))
 
 
 def print_multiline_value(label: str, text: str) -> None:
@@ -2326,6 +2437,9 @@ def print_help() -> None:
             ("/mcp summary", "показать сводку scheduler"),
             ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
             ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
+            ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
+            ("/mcp index-status", "показать статус локального индекса документов"),
+            ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
             ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
@@ -3016,7 +3130,7 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
         init_orchestration_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-status | /mcp compare-chunking | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:
