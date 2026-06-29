@@ -484,6 +484,8 @@ def print_mcp_help() -> None:
     print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
     print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
     print(indented_line("/mcp add cupertino -- cupertino serve --no-reap", level=2))
+    print()
+    print_ollama_help()
 
 
 def add_mcp_server_from_command(config_path: Path, argument: str) -> None:
@@ -2444,6 +2446,20 @@ def print_help() -> None:
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
             ("agent --mcp-config-tools", "проверить MCP config из shell"),
+        ),
+    )
+    print()
+    print_ollama_help()
+
+
+def print_ollama_help() -> None:
+    print_command_help_section(
+        "Ollama",
+        (
+            ("Модель", "nomic-embed-text для embeddings в /mcp index-docs"),
+            ("ollama serve", "запустить локальный server на 127.0.0.1:11434"),
+            ("Ctrl+C", "остановить server, если он запущен вручную через ollama serve"),
+            ("address already in use", "Ollama уже запущена; второй server на том же порту не стартует"),
         ),
     )
 
