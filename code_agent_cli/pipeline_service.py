@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from code_agent_cli.agent import env_float, https_ssl_context
 from code_agent_cli.document_index import DocumentIndexService
+from code_agent_cli.rag_service import RAGService
 
 
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
@@ -219,6 +220,31 @@ class PipelineService:
 
     def compare_chunking(self) -> dict[str, Any]:
         return DocumentIndexService().compare_chunking()
+
+    def rag_search(self, question: str, *, top_k: int = 5) -> dict[str, Any]:
+        return RAGService().search(question, top_k=top_k)
+
+    def rag_answer(self, question: str, *, use_rag: bool = True, top_k: int = 5) -> dict[str, Any]:
+        return RAGService().answer(question, use_rag=use_rag, top_k=top_k)
+
+    def rag_compare(self, question: str, *, top_k: int = 5) -> dict[str, Any]:
+        return RAGService().compare(question, top_k=top_k)
+
+    def rag_eval_questions(self) -> dict[str, Any]:
+        return RAGService().eval_questions()
+
+    def rag_eval(
+        self,
+        *,
+        top_k: int = 5,
+        max_questions: int = 10,
+        run_answers: bool = True,
+    ) -> dict[str, Any]:
+        return RAGService().evaluate(
+            top_k=top_k,
+            max_questions=max_questions,
+            run_answers=run_answers,
+        )
 
 
 def parse_duckduckgo_html(html: str, *, limit: int) -> list[SearchResult]:

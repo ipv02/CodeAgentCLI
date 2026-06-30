@@ -460,6 +460,10 @@ def print_mcp_help() -> None:
             ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
             ("/mcp index-status", "показать статус локального индекса документов"),
             ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
+            ("/mcp rag-search QUESTION", "найти релевантные chunks в локальном индексе"),
+            ("/mcp rag-answer QUESTION", "ответить на вопрос с RAG-контекстом"),
+            ("/mcp rag-compare QUESTION", "сравнить ответ без RAG и с RAG"),
+            ("/mcp rag-eval", "прогнать 10 контрольных вопросов RAG"),
             ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
@@ -479,6 +483,8 @@ def print_mcp_help() -> None:
     print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
     print(indented_line("/mcp index-docs .", level=2))
     print(indented_line("/mcp compare-chunking", level=2))
+    print(indented_line('/mcp rag-compare "Где хранится MCP config?"', level=2))
+    print(indented_line("/mcp rag-eval", level=2))
     print(indented_line('/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сохрани в заметки и поставь напоминание проверить завтра"', level=2))
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
     print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
@@ -1124,7 +1130,8 @@ def mcp_loader_label(server_name: str, tool_name: str) -> str:
 
 
 def mcp_tool_timeout(server_name: str, tool_name: str) -> float:
-    default_timeout = 300.0 if server_name == "pipeline" and tool_name == "index_documents" else 30.0
+    long_pipeline_tools = {"index_documents", "rag_answer", "rag_compare", "rag_eval"}
+    default_timeout = 300.0 if server_name == "pipeline" and tool_name in long_pipeline_tools else 30.0
     return env_float("CODE_AGENT_MCP_TIMEOUT", default_timeout)
 
 
@@ -1177,6 +1184,43 @@ def handle_scheduler_short_command(config_path: Path, command: str, argument: st
 
 
 def handle_pipeline_short_command(config_path: Path, command: str, argument: str) -> bool:
+    if command == "rag-search":
+        question = parse_required_text_argument("rag-search", argument)
+        if question is None:
+            return True
+        call_pipeline_tool_from_short_command(config_path, "rag_search", {"question": question})
+        return True
+
+    if command == "rag-answer":
+        question = parse_required_text_argument("rag-answer", argument)
+        if question is None:
+            return True
+        call_pipeline_tool_from_short_command(config_path, "rag_answer", {"question": question, "use_rag": True})
+        return True
+
+    if command == "rag-compare":
+        question = parse_required_text_argument("rag-compare", argument)
+        if question is None:
+            return True
+        call_pipeline_tool_from_short_command(config_path, "rag_compare", {"question": question})
+        return True
+
+    if command == "rag-eval-questions":
+        call_pipeline_tool_from_short_command(config_path, "rag_eval_questions", {})
+        return True
+
+    if command == "rag-eval":
+        arguments: dict[str, Any] = {"run_answers": True}
+        if argument.strip():
+            try:
+                max_questions = int(argument.strip())
+            except ValueError:
+                print("Использование: /mcp rag-eval [MAX_QUESTIONS]")
+                return True
+            arguments["max_questions"] = max_questions
+        call_pipeline_tool_from_short_command(config_path, "rag_eval", arguments)
+        return True
+
     if command == "index-docs":
         path = argument.strip() or "."
         call_pipeline_tool_from_short_command(
@@ -1218,6 +1262,19 @@ def handle_pipeline_short_command(config_path: Path, command: str, argument: str
         },
     )
     return True
+
+
+def parse_required_text_argument(command: str, argument: str) -> str | None:
+    try:
+        parts = shlex.split(argument)
+    except ValueError as error:
+        print(f"Ошибка {command}: {error}", file=sys.stderr)
+        return None
+    text = " ".join(parts).strip()
+    if not text:
+        print(f'Использование: /mcp {command} "вопрос"')
+        return None
+    return text
 
 
 def parse_scheduler_remind_arguments(argument: str) -> dict[str, Any] | None:
@@ -1341,6 +1398,21 @@ def print_pipeline_tool_call_result(
     if tool_name == "compare_chunking":
         print_document_chunking_comparison(payload)
         return True
+    if tool_name == "rag_search":
+        print_rag_search_result(payload)
+        return True
+    if tool_name == "rag_answer":
+        print_rag_answer_result(payload)
+        return True
+    if tool_name == "rag_compare":
+        print_rag_compare_result(payload)
+        return True
+    if tool_name == "rag_eval_questions":
+        print_rag_eval_questions(payload)
+        return True
+    if tool_name == "rag_eval":
+        print_rag_eval_result(payload)
+        return True
     if tool_name == "health":
         print(status_line("Состояние", str(payload.get("status", "")), SUCCESS))
         print(status_line("Output dir", str(payload.get("output_dir", "")), VALUE))
@@ -1458,6 +1530,108 @@ def print_document_chunking_comparison(payload: dict[str, Any]) -> None:
             value = comparison.get(key)
             if value:
                 print_multiline_value(key, str(value))
+
+
+def print_rag_search_result(payload: dict[str, Any]) -> None:
+    print(colorize("RAG search", BOLD + ACCENT))
+    print(status_line("Question", str(payload.get("question", "")), VALUE))
+    print(status_line("Top K", str(payload.get("top_k", 0)), VALUE))
+    chunks = ensure_list(payload.get("chunks"))
+    print(status_line("Chunks", str(len(chunks)), SUCCESS))
+    for index, chunk in enumerate(chunks[:5], start=1):
+        if not isinstance(chunk, dict):
+            continue
+        print()
+        print(status_line(f"Chunk {index}", str(chunk.get("chunk_id", "")), SUCCESS))
+        print(status_line("Source", str(chunk.get("source", "")), VALUE))
+        print(status_line("Section", str(chunk.get("section", "")), VALUE))
+        print(status_line("Score", str(chunk.get("score", "")), VALUE))
+        print_multiline_value("Preview", str(chunk.get("preview", "")))
+
+
+def print_rag_answer_result(payload: dict[str, Any]) -> None:
+    print(colorize("RAG answer", BOLD + ACCENT))
+    print(status_line("Mode", str(payload.get("mode", "")), SUCCESS))
+    print(status_line("Question", str(payload.get("question", "")), VALUE))
+    print(status_line("Model", str(payload.get("model", "")), VALUE))
+    print_multiline_value("Answer", str(payload.get("answer", "")))
+    print_rag_sources(payload.get("sources"))
+
+
+def print_rag_compare_result(payload: dict[str, Any]) -> None:
+    print(colorize("RAG comparison", BOLD + ACCENT))
+    print(status_line("Question", str(payload.get("question", "")), VALUE))
+    without_rag = payload.get("without_rag") if isinstance(payload.get("without_rag"), dict) else {}
+    with_rag = payload.get("with_rag") if isinstance(payload.get("with_rag"), dict) else {}
+    print()
+    print_multiline_value("Without RAG", str(without_rag.get("answer", "")))
+    print()
+    print_multiline_value("With RAG", str(with_rag.get("answer", "")))
+    print_rag_sources(with_rag.get("sources"))
+    note = str(payload.get("quality_note", ""))
+    if note:
+        print()
+        print_multiline_value("Quality note", note)
+
+
+def print_rag_eval_questions(payload: dict[str, Any]) -> None:
+    print(colorize("RAG eval questions", BOLD + ACCENT))
+    print(status_line("Questions", str(payload.get("count", 0)), SUCCESS))
+    for index, item in enumerate(ensure_list(payload.get("questions")), start=1):
+        if not isinstance(item, dict):
+            continue
+        print()
+        print(status_line(f"Question {index}", str(item.get("question", "")), SUCCESS))
+        print_multiline_value("Expected", str(item.get("expected", "")))
+        sources = item.get("expected_sources")
+        if isinstance(sources, list):
+            print(status_line("Expected sources", ", ".join(str(source) for source in sources), VALUE))
+
+
+def print_rag_eval_result(payload: dict[str, Any]) -> None:
+    print(colorize("RAG eval", BOLD + ACCENT))
+    print(status_line("Questions", str(payload.get("questions", 0)), SUCCESS))
+    print(status_line("Top K", str(payload.get("top_k", 0)), VALUE))
+    print(status_line("Answers", "run" if payload.get("run_answers") else "not run", VALUE))
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        for key, value in summary.items():
+            print(status_line(str(key), str(value), VALUE))
+    for index, item in enumerate(ensure_list(payload.get("results")), start=1):
+        if not isinstance(item, dict):
+            continue
+        print()
+        print(status_line(f"Question {index}", str(item.get("question", "")), SUCCESS))
+        print_multiline_value("Expected", str(item.get("expected", "")))
+        source_hits = item.get("source_hits")
+        if isinstance(source_hits, dict):
+            rendered_hits = ", ".join(
+                f"{source}={'ok' if matched else 'miss'}"
+                for source, matched in source_hits.items()
+            )
+            print(status_line("Source hits", rendered_hits, VALUE))
+        if item.get("with_rag"):
+            print_multiline_value("With RAG", str(item.get("with_rag", "")))
+        if item.get("without_rag"):
+            print_multiline_value("Without RAG", str(item.get("without_rag", "")))
+
+
+def print_rag_sources(value: Any) -> None:
+    sources = ensure_list(value)
+    if not sources:
+        return
+    print()
+    print(status_line("Sources", str(len(sources)), SUCCESS))
+    for source in sources[:8]:
+        if not isinstance(source, dict):
+            continue
+        print(
+            status_line(
+                str(source.get("source", "")),
+                f"{source.get('section', '')} · {source.get('chunk_id', '')} · score={source.get('score', '')}",
+                VALUE,
+            )
+        )
 
 
 def print_multiline_value(label: str, text: str) -> None:
@@ -2442,6 +2616,10 @@ def print_help() -> None:
             ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
             ("/mcp index-status", "показать статус локального индекса документов"),
             ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
+            ("/mcp rag-search QUESTION", "найти релевантные chunks в локальном индексе"),
+            ("/mcp rag-answer QUESTION", "ответить на вопрос с RAG-контекстом"),
+            ("/mcp rag-compare QUESTION", "сравнить ответ без RAG и с RAG"),
+            ("/mcp rag-eval", "прогнать 10 контрольных вопросов RAG"),
             ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
             ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
             ("/mcp help", "показать помощь по MCP"),
@@ -3146,7 +3324,7 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
         init_orchestration_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-status | /mcp compare-chunking | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-status | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

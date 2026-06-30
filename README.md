@@ -224,6 +224,40 @@ agent
 Допустимые значения: `chunk_size` от `500` до `1000`, `overlap` от `50` до
 `100`.
 
+### Первый RAG-запрос
+
+После построения индекса pipeline MCP умеет отвечать на вопросы в двух режимах:
+без RAG и с RAG-контекстом из локального SQLite index.
+
+```text
+agent
+/mcp init-pipeline
+/mcp index-docs /Users/ipv/Desktop/Develop/CodeAgentCLI
+/mcp rag-search "Где хранится MCP config?"
+/mcp rag-answer "Где хранится MCP config?"
+/mcp rag-compare "Где хранится MCP config?"
+/mcp rag-eval
+```
+
+RAG flow:
+
+```text
+question -> Ollama embedding -> top chunks from document_index.db -> LLM answer with sources
+```
+
+Команда `/mcp rag-compare` показывает два ответа:
+
+```text
+Without RAG: ответ модели без локального контекста
+With RAG: ответ модели с найденными chunks и Sources
+```
+
+Команда `/mcp rag-eval` использует 10 контрольных вопросов по базе проекта.
+Для каждого вопроса зафиксированы ожидание, ключевые термины и ожидаемые
+источники. Итог показывает совпадения по источникам и ключевым терминам для
+RAG и non-RAG ответов. Полный прогон делает LLM-запросы для каждой пары
+ответов, поэтому требует `DEEPSEEK_API_KEY` и может занять время.
+
 ## Встроенный mock HTTP API MCP
 
 Для первого собственного MCP-инструмента в проекте есть встроенный stdio-сервер
