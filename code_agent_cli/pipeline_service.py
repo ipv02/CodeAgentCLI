@@ -221,14 +221,56 @@ class PipelineService:
     def compare_chunking(self) -> dict[str, Any]:
         return DocumentIndexService().compare_chunking()
 
-    def rag_search(self, question: str, *, top_k: int = 5) -> dict[str, Any]:
-        return RAGService().search(question, top_k=top_k)
+    def rag_search(
+        self,
+        question: str,
+        *,
+        top_k: int = 5,
+        candidate_k: int = 12,
+        min_similarity: float = 0.35,
+        mode: str = "enhanced",
+    ) -> dict[str, Any]:
+        return RAGService().search(
+            question,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            min_similarity=min_similarity,
+            mode=mode,
+        )
 
-    def rag_answer(self, question: str, *, use_rag: bool = True, top_k: int = 5) -> dict[str, Any]:
-        return RAGService().answer(question, use_rag=use_rag, top_k=top_k)
+    def rag_answer(
+        self,
+        question: str,
+        *,
+        use_rag: bool = True,
+        top_k: int = 5,
+        candidate_k: int = 12,
+        min_similarity: float = 0.35,
+        mode: str = "enhanced",
+    ) -> dict[str, Any]:
+        return RAGService().answer(
+            question,
+            use_rag=use_rag,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            min_similarity=min_similarity,
+            mode=mode,
+        )
 
-    def rag_compare(self, question: str, *, top_k: int = 5) -> dict[str, Any]:
-        return RAGService().compare(question, top_k=top_k)
+    def rag_compare(
+        self,
+        question: str,
+        *,
+        top_k: int = 5,
+        candidate_k: int = 12,
+        min_similarity: float = 0.35,
+    ) -> dict[str, Any]:
+        return RAGService().compare(
+            question,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            min_similarity=min_similarity,
+        )
 
     def rag_eval_questions(self) -> dict[str, Any]:
         return RAGService().eval_questions()
@@ -237,11 +279,15 @@ class PipelineService:
         self,
         *,
         top_k: int = 5,
+        candidate_k: int = 12,
+        min_similarity: float = 0.35,
         max_questions: int = 10,
         run_answers: bool = True,
     ) -> dict[str, Any]:
         return RAGService().evaluate(
             top_k=top_k,
+            candidate_k=candidate_k,
+            min_similarity=min_similarity,
             max_questions=max_questions,
             run_answers=run_answers,
         )

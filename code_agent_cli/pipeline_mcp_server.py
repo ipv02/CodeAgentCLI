@@ -112,24 +112,60 @@ def compare_chunking() -> dict[str, Any]:
     title="RAG search",
     description="Embed a question with Ollama and return relevant chunks from the local SQLite index.",
 )
-def rag_search(question: str, top_k: int = 5) -> dict[str, Any]:
-    return service().rag_search(question, top_k=top_k)
+def rag_search(
+    question: str,
+    top_k: int = 5,
+    candidate_k: int = 12,
+    min_similarity: float = 0.35,
+    mode: str = "enhanced",
+) -> dict[str, Any]:
+    return service().rag_search(
+        question,
+        top_k=top_k,
+        candidate_k=candidate_k,
+        min_similarity=min_similarity,
+        mode=mode,
+    )
 
 
 @mcp.tool(
     title="RAG answer",
     description="Answer a question with or without local RAG context.",
 )
-def rag_answer(question: str, use_rag: bool = True, top_k: int = 5) -> dict[str, Any]:
-    return service().rag_answer(question, use_rag=use_rag, top_k=top_k)
+def rag_answer(
+    question: str,
+    use_rag: bool = True,
+    top_k: int = 5,
+    candidate_k: int = 12,
+    min_similarity: float = 0.35,
+    mode: str = "enhanced",
+) -> dict[str, Any]:
+    return service().rag_answer(
+        question,
+        use_rag=use_rag,
+        top_k=top_k,
+        candidate_k=candidate_k,
+        min_similarity=min_similarity,
+        mode=mode,
+    )
 
 
 @mcp.tool(
     title="Compare RAG answer",
     description="Compare a direct LLM answer with an answer grounded in retrieved local chunks.",
 )
-def rag_compare(question: str, top_k: int = 5) -> dict[str, Any]:
-    return service().rag_compare(question, top_k=top_k)
+def rag_compare(
+    question: str,
+    top_k: int = 5,
+    candidate_k: int = 12,
+    min_similarity: float = 0.35,
+) -> dict[str, Any]:
+    return service().rag_compare(
+        question,
+        top_k=top_k,
+        candidate_k=candidate_k,
+        min_similarity=min_similarity,
+    )
 
 
 @mcp.tool(
@@ -144,9 +180,17 @@ def rag_eval_questions() -> dict[str, Any]:
     title="Run RAG evaluation",
     description="Run the control question set and compare RAG quality against direct answers.",
 )
-def rag_eval(top_k: int = 5, max_questions: int = 10, run_answers: bool = True) -> dict[str, Any]:
+def rag_eval(
+    top_k: int = 5,
+    candidate_k: int = 12,
+    min_similarity: float = 0.35,
+    max_questions: int = 10,
+    run_answers: bool = True,
+) -> dict[str, Any]:
     return service().rag_eval(
         top_k=top_k,
+        candidate_k=candidate_k,
+        min_similarity=min_similarity,
         max_questions=max_questions,
         run_answers=run_answers,
     )

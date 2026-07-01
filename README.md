@@ -242,21 +242,28 @@ agent
 RAG flow:
 
 ```text
-question -> Ollama embedding -> top chunks from document_index.db -> LLM answer with sources
+question -> query rewrite -> Ollama embedding -> candidate chunks -> similarity filter + heuristic rerank -> LLM answer with sources
 ```
 
-Команда `/mcp rag-compare` показывает два ответа:
+По умолчанию RAG использует enhanced retrieval без отдельной reranker-модели:
+сначала берет `candidate_k` chunks, затем отсекает результаты ниже
+`min_similarity` и переупорядочивает оставшиеся chunks простыми эвристиками
+по совпадению терминов в тексте, title, section и source.
+
+Команда `/mcp rag-compare` показывает три ответа:
 
 ```text
 Without RAG: ответ модели без локального контекста
-With RAG: ответ модели с найденными chunks и Sources
+Baseline RAG: ответ с обычным vector search без rewrite/filter/rerank
+Enhanced RAG: ответ с query rewrite, similarity filter и heuristic rerank
 ```
 
 Команда `/mcp rag-eval` использует 10 контрольных вопросов по базе проекта.
 Для каждого вопроса зафиксированы ожидание, ключевые термины и ожидаемые
 источники. Итог показывает совпадения по источникам и ключевым терминам для
-RAG и non-RAG ответов. Полный прогон делает LLM-запросы для каждой пары
-ответов, поэтому требует `DEEPSEEK_API_KEY` и может занять время.
+baseline RAG, enhanced RAG и non-RAG ответов. Полный прогон делает LLM-запросы
+для каждого режима ответа, поэтому требует `DEEPSEEK_API_KEY` и может занять
+время.
 
 ## Встроенный mock HTTP API MCP
 

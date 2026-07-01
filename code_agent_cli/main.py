@@ -436,60 +436,85 @@ def print_mcp_config_servers(config: MCPConfig) -> None:
 
 
 def print_mcp_help() -> None:
-    print_command_help_section(
+    print_command_help_grouped_section(
         "MCP",
         (
-            ("/mcp", "проверить подключение серверов из config"),
-            ("/mcp tools", "показать инструменты серверов"),
-            ("/mcp show", "показать сохраненные серверы"),
-            ("/mcp add NAME -- COMMAND ARGS", "добавить или подключить свой MCP-сервер"),
-            ("/mcp remove NAME", "удалить MCP-сервер из config"),
-            ("/mcp clear", "удалить все MCP-серверы из config"),
-            ("/mcp path", "показать путь к config"),
-            ("/mcp test", "проверить подключение с диагностикой ошибок"),
-            ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
-            ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
-            ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
-            ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
-            ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
-            ("/mcp remind TEXT AT", "создать reminder без JSON"),
-            ("/mcp run_due", "выполнить due jobs"),
-            ("/mcp summary", "показать сводку scheduler"),
-            ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
-            ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
-            ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
-            ("/mcp index-status", "показать статус локального индекса документов"),
-            ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
-            ("/mcp rag-search QUESTION", "найти релевантные chunks в локальном индексе"),
-            ("/mcp rag-answer QUESTION", "ответить на вопрос с RAG-контекстом"),
-            ("/mcp rag-compare QUESTION", "сравнить ответ без RAG и с RAG"),
-            ("/mcp rag-eval", "прогнать 10 контрольных вопросов RAG"),
-            ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
-            ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
-            ("/mcp help", "показать помощь по MCP"),
-            ("agent --mcp-config-tools", "проверить MCP config из shell"),
+            (
+                "Config",
+                (
+                    ("/mcp", "проверить подключение серверов из config"),
+                    ("/mcp tools", "показать инструменты серверов"),
+                    ("/mcp show", "показать сохраненные серверы"),
+                    ("/mcp add NAME -- COMMAND ARGS", "добавить или подключить свой MCP-сервер"),
+                    ("/mcp remove NAME", "удалить MCP-сервер из config"),
+                    ("/mcp clear", "удалить все MCP-серверы из config"),
+                    ("/mcp path", "показать путь к config"),
+                    ("/mcp test", "проверить подключение с диагностикой ошибок"),
+                    ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
+                    ("/mcp help", "показать помощь по MCP"),
+                    ("agent --mcp-config-tools", "проверить MCP config из shell"),
+                ),
+            ),
+            (
+                "Init",
+                (
+                    ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
+                    ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+                    ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
+                    ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
+                    ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
+                ),
+            ),
+            (
+                "Scheduler",
+                (
+                    ("/mcp remind TEXT AT", "создать reminder без JSON"),
+                    ("/mcp run_due", "выполнить due jobs"),
+                    ("/mcp summary", "показать сводку scheduler"),
+                    ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
+                ),
+            ),
+            (
+                "Pipeline и RAG",
+                (
+                    ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
+                    ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
+                    ("/mcp index-status", "показать статус локального индекса документов"),
+                    ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
+                    ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
+                    ("/mcp rag-answer QUESTION", "ответить с enhanced RAG-контекстом и sources"),
+                    ("/mcp rag-compare QUESTION", "сравнить Without RAG, Baseline RAG и Enhanced RAG"),
+                    ("/mcp rag-eval", "сравнить baseline/enhanced RAG на 10 контрольных вопросах"),
+                    ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
+                ),
+            ),
         ),
     )
     print()
-    print(indented_line("Примеры:"))
-    print(indented_line('/mcp init-mock', level=2))
-    print(indented_line('/mcp init-scheduler', level=2))
-    print(indented_line('/mcp init-pipeline', level=2))
-    print(indented_line('/mcp init-orchestration', level=2))
-    print(indented_line('/mcp remind "Проверить планировщик" 2026-06-24T12:30:00Z', level=2))
-    print(indented_line("/mcp run_due", level=2))
-    print(indented_line("/mcp summary", level=2))
-    print(indented_line("/mcp clear-scheduler", level=2))
-    print(indented_line('/mcp pipeline "latest MCP protocol news" mcp-summary.md', level=2))
-    print(indented_line("/mcp index-docs .", level=2))
-    print(indented_line("/mcp compare-chunking", level=2))
-    print(indented_line('/mcp rag-compare "Где хранится MCP config?"', level=2))
-    print(indented_line("/mcp rag-eval", level=2))
-    print(indented_line('/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сохрани в заметки и поставь напоминание проверить завтра"', level=2))
-    print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
-    print(indented_line('/mcp call scheduler summary {"limit": 5}', level=2))
-    print(indented_line("/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest", level=2))
-    print(indented_line("/mcp add cupertino -- cupertino serve --no-reap", level=2))
+    print(subheader_line("Примеры"))
+    print_help_examples(
+        (
+            "/mcp init-mock",
+            "/mcp init-scheduler",
+            "/mcp init-pipeline",
+            "/mcp init-orchestration",
+            '/mcp remind "Проверить планировщик" 2026-06-24T12:30:00Z',
+            "/mcp run_due",
+            "/mcp summary",
+            "/mcp clear-scheduler",
+            '/mcp pipeline "latest MCP protocol news" mcp-summary.md',
+            "/mcp index-docs .",
+            "/mcp compare-chunking",
+            '/mcp rag-search "Какая Ollama модель используется для embeddings?"',
+            '/mcp rag-compare "Где хранится MCP config?"',
+            "/mcp rag-eval",
+            '/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сохрани в заметки и поставь напоминание проверить завтра"',
+            '/mcp call mock-api get_mock_user {"user_id": 1}',
+            '/mcp call scheduler summary {"limit": 5}',
+            "/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest",
+            "/mcp add cupertino -- cupertino serve --no-reap",
+        )
+    )
     print()
     print_ollama_help()
 
@@ -1535,7 +1560,17 @@ def print_document_chunking_comparison(payload: dict[str, Any]) -> None:
 def print_rag_search_result(payload: dict[str, Any]) -> None:
     print(colorize("RAG search", BOLD + ACCENT))
     print(status_line("Question", str(payload.get("question", "")), VALUE))
+    print(status_line("Mode", str(payload.get("mode", "")), SUCCESS))
+    rewritten = str(payload.get("rewritten_question", ""))
+    if rewritten:
+        print_multiline_value("Rewrite", rewritten)
     print(status_line("Top K", str(payload.get("top_k", 0)), VALUE))
+    print(status_line("Candidate K", str(payload.get("candidate_k", 0)), VALUE))
+    if payload.get("min_similarity") is not None:
+        print(status_line("Min similarity", str(payload.get("min_similarity", "")), VALUE))
+        print(status_line("After filter", str(payload.get("candidates_after_filter", 0)), SUCCESS))
+        print(status_line("Final chunks", str(payload.get("top_k_after_filter", 0)), SUCCESS))
+        print(status_line("Filtered out", str(payload.get("filtered_out", 0)), VALUE))
     chunks = ensure_list(payload.get("chunks"))
     print(status_line("Chunks", str(len(chunks)), SUCCESS))
     for index, chunk in enumerate(chunks[:5], start=1):
@@ -1546,6 +1581,8 @@ def print_rag_search_result(payload: dict[str, Any]) -> None:
         print(status_line("Source", str(chunk.get("source", "")), VALUE))
         print(status_line("Section", str(chunk.get("section", "")), VALUE))
         print(status_line("Score", str(chunk.get("score", "")), VALUE))
+        if chunk.get("similarity") is not None:
+            print(status_line("Similarity", str(chunk.get("similarity", "")), VALUE))
         print_multiline_value("Preview", str(chunk.get("preview", "")))
 
 
@@ -1562,12 +1599,36 @@ def print_rag_compare_result(payload: dict[str, Any]) -> None:
     print(colorize("RAG comparison", BOLD + ACCENT))
     print(status_line("Question", str(payload.get("question", "")), VALUE))
     without_rag = payload.get("without_rag") if isinstance(payload.get("without_rag"), dict) else {}
+    baseline_rag = payload.get("baseline_rag") if isinstance(payload.get("baseline_rag"), dict) else {}
     with_rag = payload.get("with_rag") if isinstance(payload.get("with_rag"), dict) else {}
     print()
     print_multiline_value("Without RAG", str(without_rag.get("answer", "")))
     print()
-    print_multiline_value("With RAG", str(with_rag.get("answer", "")))
+    print_multiline_value("Baseline RAG", str(baseline_rag.get("answer", "")))
+    print_rag_sources(baseline_rag.get("sources"))
+    print()
+    print_multiline_value("Enhanced RAG", str(with_rag.get("answer", "")))
     print_rag_sources(with_rag.get("sources"))
+    retrieval_modes = payload.get("retrieval_modes")
+    if isinstance(retrieval_modes, dict):
+        print()
+        print(colorize("Retrieval modes", BOLD + ACCENT))
+        for name in ("baseline", "enhanced"):
+            retrieval = retrieval_modes.get(name)
+            if not isinstance(retrieval, dict):
+                continue
+            print(
+                status_line(
+                    name,
+                    (
+                        f"candidate_k={retrieval.get('candidate_k', '')}, "
+                        f"after_filter={retrieval.get('candidates_after_filter', '')}, "
+                        f"final={retrieval.get('top_k_after_filter', '')}, "
+                        f"filtered_out={retrieval.get('filtered_out', '')}"
+                    ),
+                    VALUE,
+                )
+            )
     note = str(payload.get("quality_note", ""))
     if note:
         print()
@@ -1592,6 +1653,8 @@ def print_rag_eval_result(payload: dict[str, Any]) -> None:
     print(colorize("RAG eval", BOLD + ACCENT))
     print(status_line("Questions", str(payload.get("questions", 0)), SUCCESS))
     print(status_line("Top K", str(payload.get("top_k", 0)), VALUE))
+    print(status_line("Candidate K", str(payload.get("candidate_k", 0)), VALUE))
+    print(status_line("Min similarity", str(payload.get("min_similarity", "")), VALUE))
     print(status_line("Answers", "run" if payload.get("run_answers") else "not run", VALUE))
     summary = payload.get("summary")
     if isinstance(summary, dict):
@@ -1609,9 +1672,18 @@ def print_rag_eval_result(payload: dict[str, Any]) -> None:
                 f"{source}={'ok' if matched else 'miss'}"
                 for source, matched in source_hits.items()
             )
-            print(status_line("Source hits", rendered_hits, VALUE))
+            print(status_line("Enhanced source hits", rendered_hits, VALUE))
+        baseline_source_hits = item.get("baseline_source_hits")
+        if isinstance(baseline_source_hits, dict):
+            rendered_hits = ", ".join(
+                f"{source}={'ok' if matched else 'miss'}"
+                for source, matched in baseline_source_hits.items()
+            )
+            print(status_line("Baseline source hits", rendered_hits, VALUE))
         if item.get("with_rag"):
-            print_multiline_value("With RAG", str(item.get("with_rag", "")))
+            print_multiline_value("Enhanced RAG", str(item.get("with_rag", "")))
+        if item.get("baseline_rag"):
+            print_multiline_value("Baseline RAG", str(item.get("baseline_rag", "")))
         if item.get("without_rag"):
             print_multiline_value("Without RAG", str(item.get("without_rag", "")))
 
@@ -1628,7 +1700,10 @@ def print_rag_sources(value: Any) -> None:
         print(
             status_line(
                 str(source.get("source", "")),
-                f"{source.get('section', '')} · {source.get('chunk_id', '')} · score={source.get('score', '')}",
+                (
+                    f"{source.get('section', '')} · {source.get('chunk_id', '')} · "
+                    f"score={source.get('score', '')} · similarity={source.get('similarity', '')}"
+                ),
                 VALUE,
             )
         )
@@ -2592,38 +2667,58 @@ def print_help() -> None:
         )
     )
     print()
-    print_command_help_section(
+    print_command_help_grouped_section(
         "MCP",
         (
-            ("/mcp", "проверить подключение MCP-серверов из config"),
-            ("/mcp add NAME -- COMMAND ARGS", "добавить свой MCP-сервер"),
-            ("/mcp remove NAME", "удалить MCP-сервер из config"),
-            ("/mcp clear", "удалить все MCP-серверы из config"),
-            ("/mcp show", "показать сохраненные MCP-серверы"),
-            ("/mcp tools", "показать инструменты MCP-серверов"),
-            ("/mcp test", "проверить MCP-серверы с диагностикой ошибок"),
-            ("/mcp path", "показать путь к MCP config"),
-            ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
-            ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
-            ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
-            ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
-            ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
-            ("/mcp remind TEXT AT", "создать reminder без JSON"),
-            ("/mcp run_due", "выполнить due jobs scheduler"),
-            ("/mcp summary", "показать сводку scheduler"),
-            ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
-            ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
-            ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
-            ("/mcp index-status", "показать статус локального индекса документов"),
-            ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
-            ("/mcp rag-search QUESTION", "найти релевантные chunks в локальном индексе"),
-            ("/mcp rag-answer QUESTION", "ответить на вопрос с RAG-контекстом"),
-            ("/mcp rag-compare QUESTION", "сравнить ответ без RAG и с RAG"),
-            ("/mcp rag-eval", "прогнать 10 контрольных вопросов RAG"),
-            ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
-            ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
-            ("/mcp help", "показать помощь по MCP"),
-            ("agent --mcp-config-tools", "проверить MCP config из shell"),
+            (
+                "Config",
+                (
+                    ("/mcp", "проверить подключение MCP-серверов из config"),
+                    ("/mcp show", "показать сохраненные MCP-серверы"),
+                    ("/mcp tools", "показать инструменты MCP-серверов"),
+                    ("/mcp test", "проверить MCP-серверы с диагностикой ошибок"),
+                    ("/mcp path", "показать путь к MCP config"),
+                    ("/mcp add NAME -- COMMAND ARGS", "добавить свой MCP-сервер"),
+                    ("/mcp remove NAME", "удалить MCP-сервер из config"),
+                    ("/mcp clear", "удалить все MCP-серверы из config"),
+                    ("/mcp call SERVER TOOL JSON", "вызвать MCP-инструмент напрямую"),
+                    ("/mcp help", "показать помощь по MCP"),
+                    ("agent --mcp-config-tools", "проверить MCP config из shell"),
+                ),
+            ),
+            (
+                "Init",
+                (
+                    ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
+                    ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+                    ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
+                    ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
+                    ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
+                ),
+            ),
+            (
+                "Scheduler",
+                (
+                    ("/mcp remind TEXT AT", "создать reminder без JSON"),
+                    ("/mcp run_due", "выполнить due jobs scheduler"),
+                    ("/mcp summary", "показать сводку scheduler"),
+                    ("/mcp clear-scheduler", "очистить jobs и историю scheduler"),
+                ),
+            ),
+            (
+                "Pipeline и RAG",
+                (
+                    ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
+                    ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
+                    ("/mcp index-status", "показать статус локального индекса документов"),
+                    ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
+                    ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
+                    ("/mcp rag-answer QUESTION", "ответить с enhanced RAG-контекстом и sources"),
+                    ("/mcp rag-compare QUESTION", "сравнить Without RAG, Baseline RAG и Enhanced RAG"),
+                    ("/mcp rag-eval", "сравнить baseline/enhanced RAG на 10 контрольных вопросах"),
+                    ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
+                ),
+            ),
         ),
     )
     print()
@@ -2650,18 +2745,54 @@ def print_section(title: str, lines: tuple[str, ...]) -> None:
 
 def print_command_help_section(title: str, commands: tuple[tuple[str, str], ...]) -> None:
     print(header_line(title))
+    print_command_help_rows(commands)
+
+
+def print_command_help_grouped_section(
+    title: str,
+    groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...],
+) -> None:
+    print(header_line(title))
+    for index, (group_title, commands) in enumerate(groups):
+        if index:
+            print()
+        print(subheader_line(group_title))
+        print_command_help_rows(commands, indent=4)
+
+
+def print_command_help_rows(commands: tuple[tuple[str, str], ...], *, indent: int = 2) -> None:
     width = max(len(command) for command, _ in commands)
+    description_width = max(DEFAULT_WRAP_WIDTH - indent - width - 2, 32)
     for command, description in commands:
+        wrapped_description = textwrap.wrap(description, width=description_width) or [""]
         if not use_color():
-            print(f"  {command:<{width}}  {description}")
+            print(f"{' ' * indent}{command:<{width}}  {wrapped_description[0]}")
+            for line in wrapped_description[1:]:
+                print(f"{' ' * indent}{'':<{width}}  {line}")
             continue
-        print(f"  {COMMAND}{command:<{width}}{RESET}  {MUTED}{description}{RESET}")
+        print(f"{' ' * indent}{COMMAND}{command:<{width}}{RESET}  {MUTED}{wrapped_description[0]}{RESET}")
+        for line in wrapped_description[1:]:
+            print(f"{' ' * indent}{'':<{width}}  {MUTED}{line}{RESET}")
+
+
+def print_help_examples(examples: tuple[str, ...], *, indent: int = 4) -> None:
+    width = max(DEFAULT_WRAP_WIDTH - indent, 40)
+    for example in examples:
+        wrapped_lines = textwrap.wrap(example, width=width, subsequent_indent="  ") or [example]
+        for line in wrapped_lines:
+            print(indented_line(line, level=indent // 2))
 
 
 def header_line(text: str) -> str:
     if not use_color():
         return f"{text}:"
-    return f"{ACCENT}{BOLD}{text}{RESET}{SUBTLE}:{RESET}"
+    return f"{SUCCESS}{BOLD}{text}{RESET}{SUBTLE}:{RESET}"
+
+
+def subheader_line(text: str) -> str:
+    if not use_color():
+        return f"  {text}:"
+    return f"  {CODE_KEYWORD}{BOLD}{text}{RESET}{SUBTLE}:{RESET}"
 
 
 def command_line(text: str) -> str:

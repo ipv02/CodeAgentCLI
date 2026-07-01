@@ -9,6 +9,7 @@ It includes:
 - DeepSeek-compatible chat completions;
 - local history, profile memory and invariants;
 - MCP stdio server configuration and tool listing;
+- Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
 - token counting and context-limit checks;
 - internal subagent prompts for response, memory and task state.
 
@@ -24,6 +25,7 @@ Main responsibility areas:
 - context construction, token counting and context-limit checks;
 - local history, profile memory, task state and invariants;
 - MCP config loading, validation and stdio client integration;
+- local document indexing, retrieval, query rewriting, filtering and RAG evaluation;
 - internal subagent prompts and state-update logic.
 
 Keep these boundaries intact unless the task explicitly requires architectural changes. Before editing, inspect the relevant files instead of relying only on this guide.
@@ -107,6 +109,25 @@ When changing MCP behavior:
 - keep failures user-friendly;
 - preserve `/mcp add`, `/mcp remove`, `/mcp clear`, `/mcp show`, `/mcp tools` and `/mcp test`;
 - treat external MCP servers as unreliable.
+
+## RAG Guidelines
+
+The pipeline RAG flow uses Ollama embeddings with `nomic-embed-text` and stores
+the local SQLite index under `~/.code-agent-cli/pipeline/document_index.db`.
+
+Default RAG search uses enhanced retrieval:
+- `query rewrite` expands project-specific terms before embedding;
+- `candidate_k` controls top-K before filtering;
+- `min_similarity` filters weak chunks;
+- heuristic rerank boosts chunks with matching terms in text, title, section and source.
+
+Keep these comparison modes clear:
+- `Without RAG`: direct LLM answer without local context;
+- `Baseline RAG`: vector search only, without rewrite/filter/rerank;
+- `Enhanced RAG`: query rewrite plus similarity filter and heuristic rerank.
+
+Use `/mcp rag-compare QUESTION` to compare answer modes and `/mcp rag-eval` to
+compare baseline vs enhanced retrieval quality on the control questions.
 
 ## Verification
 
