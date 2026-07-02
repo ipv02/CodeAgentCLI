@@ -23,6 +23,7 @@ class RAGError(Exception):
 DEFAULT_RAG_TOP_K = 5
 DEFAULT_RAG_CANDIDATE_K = 12
 DEFAULT_RAG_MIN_SIMILARITY = 0.35
+DEFAULT_RAG_QUOTE_LIMIT = 5
 MAX_RAG_TOP_K = 20
 RAG_RETRIEVAL_MODES = {"baseline", "filtered", "enhanced"}
 
@@ -133,8 +134,10 @@ class RAGService:
             "top_k_after_filter": len(ranked),
             "min_similarity": None if mode == "baseline" else min_similarity,
             "filtered_out": filtered_out,
+            "best_similarity": round(ranked[0].similarity, 4) if ranked else 0.0,
+            "grounding_status": "grounded" if ranked else "weak_context",
             "strategy": strategy or "all",
-            "chunks": [render_retrieved_chunk(chunk) for chunk in ranked],
+            "chunks": [render_retrieved_chunk(clean_question, chunk) for chunk in ranked],
         }
 
     def answer(
@@ -153,6 +156,8 @@ class RAGService:
 
         retrieval_payload: dict[str, Any] | None = None
         retrieved_chunks: list[dict[str, Any]] = []
+        grounding_status = "no_rag"
+        best_similarity = 0.0
         if use_rag:
             retrieval_payload = self.search(
                 clean_question,
@@ -164,29 +169,49 @@ class RAGService:
             retrieved_chunks = [
                 chunk for chunk in retrieval_payload.get("chunks", []) if isinstance(chunk, dict)
             ]
+            best_similarity = float(retrieval_payload.get("best_similarity") or 0.0)
+            grounding_status = "grounded" if retrieved_chunks and best_similarity >= min_similarity else "weak_context"
 
-        llm_payload = generate_rag_llm_answer(
-            clean_question,
-            retrieved_chunks=retrieved_chunks,
-            use_rag=use_rag,
-        )
+        sources = render_sources(retrieved_chunks)
+        quotes = render_quotes(clean_question, retrieved_chunks)
+
+        if use_rag and grounding_status == "weak_context":
+            answer = weak_context_answer()
+            llm_payload = {
+                "content": append_grounding_sections(answer, sources=sources, quotes=quotes),
+                "raw_content": answer,
+                "model": "local-grounding-policy",
+                "usage": {},
+            }
+        else:
+            llm_payload = generate_rag_llm_answer(
+                clean_question,
+                retrieved_chunks=retrieved_chunks,
+                use_rag=use_rag,
+            )
+            llm_payload["raw_content"] = llm_payload["content"]
+            if use_rag:
+                llm_payload = {
+                    **llm_payload,
+                    "content": append_grounding_sections(
+                        llm_payload["content"],
+                        sources=sources,
+                        quotes=quotes,
+                    ),
+                }
+
         return {
             "question": clean_question,
             "mode": mode if use_rag else "no_rag",
+            "grounding_status": grounding_status,
+            "best_similarity": round(best_similarity, 4),
             "answer": llm_payload["content"],
+            "raw_answer": llm_payload.get("raw_content", llm_payload["content"]),
             "model": llm_payload["model"],
             "usage": llm_payload["usage"],
             "retrieval": retrieval_payload,
-            "sources": [
-                {
-                    "source": chunk.get("source", ""),
-                    "section": chunk.get("section", ""),
-                    "chunk_id": chunk.get("chunk_id", ""),
-                    "score": chunk.get("score", 0),
-                    "similarity": chunk.get("similarity", 0),
-                }
-                for chunk in retrieved_chunks
-            ],
+            "sources": sources,
+            "quotes": quotes,
         }
 
     def compare(
@@ -289,19 +314,33 @@ class RAGService:
                     candidate_k=candidate_k,
                     min_similarity=min_similarity,
                 )
-                entry["without_rag"] = comparison["without_rag"]["answer"]
-                entry["baseline_rag"] = comparison["baseline_rag"]["answer"]
-                entry["with_rag"] = comparison["with_rag"]["answer"]
+                without_rag_answer = str(comparison["without_rag"].get("raw_answer", comparison["without_rag"]["answer"]))
+                baseline_rag_answer = str(comparison["baseline_rag"].get("raw_answer", comparison["baseline_rag"]["answer"]))
+                with_rag_answer = str(comparison["with_rag"].get("raw_answer", comparison["with_rag"]["answer"]))
+                entry["without_rag"] = without_rag_answer
+                entry["baseline_rag"] = baseline_rag_answer
+                entry["with_rag"] = with_rag_answer
+                entry["with_rag_has_sources"] = bool(comparison["with_rag"].get("sources"))
+                entry["with_rag_has_quotes"] = bool(comparison["with_rag"].get("quotes"))
+                entry["with_rag_grounding_status"] = comparison["with_rag"].get("grounding_status", "")
+                entry["with_rag_quote_term_hits"] = expected_term_hits(
+                    render_quote_text(comparison["with_rag"].get("quotes")),
+                    [str(term) for term in item.get("expected_terms", [])],
+                )
+                entry["with_rag_answer_quote_alignment"] = answer_quote_alignment(
+                    with_rag_answer,
+                    render_quote_text(comparison["with_rag"].get("quotes")),
+                )
                 entry["with_rag_term_hits"] = expected_term_hits(
-                    comparison["with_rag"]["answer"],
+                    with_rag_answer,
                     [str(term) for term in item.get("expected_terms", [])],
                 )
                 entry["baseline_rag_term_hits"] = expected_term_hits(
-                    comparison["baseline_rag"]["answer"],
+                    baseline_rag_answer,
                     [str(term) for term in item.get("expected_terms", [])],
                 )
                 entry["without_rag_term_hits"] = expected_term_hits(
-                    comparison["without_rag"]["answer"],
+                    without_rag_answer,
                     [str(term) for term in item.get("expected_terms", [])],
                 )
             results.append(entry)
@@ -380,9 +419,12 @@ def generate_rag_llm_answer(
         context = render_rag_context(retrieved_chunks)
         system_prompt = (
             "Ты RAG-агент CodeAgentCLI. Отвечай на русском. Используй только "
-            "предоставленный контекст из локального индекса. Если контекста "
-            "недостаточно, явно скажи об этом. В конце добавь Sources со списком "
-            "source/section/chunk_id."
+            "предоставленный контекст из локального индекса. Обязательно верни "
+            "структуру: Ответ, Sources, Quotes. В Sources перечисли "
+            "source/section/chunk_id. В Quotes приведи короткие фрагменты только "
+            "из найденных чанков. Если контекст слабый или недостаточный, ответь "
+            "\"Не знаю\" и попроси уточнить вопрос. Не добавляй факты без опоры "
+            "на контекст."
         )
         user_prompt = f"Контекст:\n{context}\n\nВопрос:\n{question}"
     else:
@@ -401,43 +443,53 @@ def generate_rag_llm_answer(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=120, context=https_ssl_context()) as response:
-            response_text = response.read().decode("utf-8")
-    except HTTPError as error:
-        response_text = error.read().decode("utf-8", errors="replace")
-        raise RAGError(f"LLM API вернул HTTP {error.code}: {response_text}") from error
-    except OSError as error:
-        raise RAGError(f"LLM API недоступен: {error}") from error
+    last_empty_reason = "LLM API вернул пустой answer."
+    for attempt in range(2):
+        request = Request(
+            api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=120, context=https_ssl_context()) as response:
+                response_text = response.read().decode("utf-8")
+        except HTTPError as error:
+            response_text = error.read().decode("utf-8", errors="replace")
+            raise RAGError(f"LLM API вернул HTTP {error.code}: {response_text}") from error
+        except OSError as error:
+            raise RAGError(f"LLM API недоступен: {error}") from error
 
-    try:
-        response_payload = json.loads(response_text)
-    except json.JSONDecodeError as error:
-        raise RAGError("LLM API вернул некорректный JSON.") from error
+        try:
+            response_payload = json.loads(response_text)
+        except json.JSONDecodeError as error:
+            raise RAGError("LLM API вернул некорректный JSON.") from error
 
-    choices = response_payload.get("choices") or []
-    usage = response_payload.get("usage") or {}
-    if not choices:
-        raise RAGError("LLM API не вернул choices.")
-    message = choices[0].get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise RAGError("LLM API вернул пустой answer.")
+        choices = response_payload.get("choices") or []
+        usage = response_payload.get("usage") or {}
+        if not choices:
+            last_empty_reason = "LLM API не вернул choices."
+            if attempt == 0:
+                continue
+            raise RAGError(last_empty_reason)
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            last_empty_reason = "LLM API вернул пустой answer."
+            if attempt == 0:
+                continue
+            raise RAGError(last_empty_reason)
 
-    return {
-        "content": content.strip(),
-        "model": model,
-        "usage": usage if isinstance(usage, dict) else {},
-    }
+        return {
+            "content": content.strip(),
+            "model": model,
+            "usage": usage if isinstance(usage, dict) else {},
+        }
+
+    raise RAGError(last_empty_reason)
 
 
 def render_rag_context(chunks: list[dict[str, Any]]) -> str:
@@ -453,16 +505,122 @@ def render_rag_context(chunks: list[dict[str, Any]]) -> str:
                 f"score={chunk.get('score', 0)}"
             )
         )
+        quote = str(chunk.get("quote", "")).strip()
+        if quote:
+            lines.append(f"quote={quote}")
         lines.append(str(chunk.get("text", "")).strip()[:4000])
         lines.append("")
     return "\n".join(lines).strip()
 
 
-def render_retrieved_chunk(chunk: RetrievedChunk) -> dict[str, Any]:
+def render_retrieved_chunk(question: str, chunk: RetrievedChunk) -> dict[str, Any]:
     payload = chunk.metadata
     payload["text"] = chunk.text
+    payload["quote"] = extract_quote(question, chunk.text)
     payload["preview"] = " ".join(chunk.text.split())[:300]
     return payload
+
+
+def render_sources(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": chunk.get("source", ""),
+            "section": chunk.get("section", ""),
+            "chunk_id": chunk.get("chunk_id", ""),
+            "score": chunk.get("score", 0),
+            "similarity": chunk.get("similarity", 0),
+        }
+        for chunk in chunks
+    ]
+
+
+def render_quotes(question: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    quotes: list[dict[str, Any]] = []
+    for chunk in chunks[:DEFAULT_RAG_QUOTE_LIMIT]:
+        quote = extract_quote(question, str(chunk.get("text", "")))
+        if not quote:
+            continue
+        quotes.append(
+            {
+                "source": chunk.get("source", ""),
+                "section": chunk.get("section", ""),
+                "chunk_id": chunk.get("chunk_id", ""),
+                "quote": quote,
+                "score": chunk.get("score", 0),
+                "similarity": chunk.get("similarity", 0),
+            }
+        )
+    return quotes
+
+
+def extract_quote(question: str, text: str, *, max_chars: int = 360) -> str:
+    clean_text = " ".join(text.split())
+    if not clean_text:
+        return ""
+    terms = tokenize_for_rag(question)
+    candidates = split_quote_candidates(clean_text)
+    if not candidates:
+        return clean_text[:max_chars].strip()
+    best = max(candidates, key=lambda value: overlap_score(terms, tokenize_for_rag(value)))
+    if not best.strip():
+        best = candidates[0]
+    if len(best) <= max_chars:
+        return best.strip()
+    return best[: max_chars - 1].rstrip() + "…"
+
+
+def split_quote_candidates(text: str) -> list[str]:
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?。！？])\s+", text) if part.strip()]
+    if sentences:
+        return sentences
+    parts = [part.strip() for part in re.split(r"\n{2,}|;\s+", text) if part.strip()]
+    return parts or [text.strip()]
+
+
+def weak_context_answer() -> str:
+    return (
+        "Не знаю: в локальном индексе не найден достаточно релевантный контекст. "
+        "Уточните вопрос или переиндексируйте документы, если нужная информация должна быть в проекте."
+    )
+
+
+def append_grounding_sections(
+    answer: str,
+    *,
+    sources: list[dict[str, Any]],
+    quotes: list[dict[str, Any]],
+) -> str:
+    content = answer.strip()
+    sections: list[str] = [content]
+    source_lines = [
+        f"- {source.get('source', '')} / {source.get('section', '')} / {source.get('chunk_id', '')}"
+        for source in sources
+    ]
+    sections.append("Verified Sources:\n" + ("\n".join(source_lines) if source_lines else "- нет релевантных источников"))
+    quote_lines = [
+        (
+            f"- {quote.get('source', '')} / {quote.get('section', '')} / "
+            f"{quote.get('chunk_id', '')}: \"{quote.get('quote', '')}\""
+        )
+        for quote in quotes
+    ]
+    sections.append("Verified Quotes:\n" + ("\n".join(quote_lines) if quote_lines else "- нет релевантных цитат"))
+    return "\n\n".join(section for section in sections if section)
+
+
+def render_quote_text(value: Any) -> str:
+    quotes = value if isinstance(value, list) else []
+    return "\n".join(str(quote.get("quote", "")) for quote in quotes if isinstance(quote, dict))
+
+
+def answer_quote_alignment(answer: str, quotes_text: str) -> dict[str, Any]:
+    answer_terms = tokenize_for_rag(answer)
+    quote_terms = tokenize_for_rag(quotes_text)
+    score = overlap_score(answer_terms, quote_terms)
+    return {
+        "score": round(score, 4),
+        "aligned": bool(answer_terms and quote_terms and score >= 0.25),
+    }
 
 
 def rerank_chunks(question: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -570,6 +728,9 @@ def summarize_eval_results(results: list[dict[str, Any]], *, run_answers: bool) 
     rag_term_hits = 0
     baseline_rag_term_hits = 0
     no_rag_term_hits = 0
+    answers_with_sources = 0
+    answers_with_quotes = 0
+    aligned_answers = 0
     total_terms = 0
     for result in results:
         source_hits = result.get("source_hits")
@@ -590,6 +751,13 @@ def summarize_eval_results(results: list[dict[str, Any]], *, run_answers: bool) 
                 baseline_rag_term_hits += sum(1 for matched in baseline_rag_hits.values() if matched)
             if isinstance(without_rag_hits, dict):
                 no_rag_term_hits += sum(1 for matched in without_rag_hits.values() if matched)
+            if result.get("with_rag_has_sources"):
+                answers_with_sources += 1
+            if result.get("with_rag_has_quotes"):
+                answers_with_quotes += 1
+            alignment = result.get("with_rag_answer_quote_alignment")
+            if isinstance(alignment, dict) and alignment.get("aligned"):
+                aligned_answers += 1
 
     summary: dict[str, Any] = {
         "enhanced_expected_source_matches": f"{matched_expected_sources}/{total_expected_sources}",
@@ -599,4 +767,7 @@ def summarize_eval_results(results: list[dict[str, Any]], *, run_answers: bool) 
         summary["enhanced_rag_expected_term_matches"] = f"{rag_term_hits}/{total_terms}"
         summary["baseline_rag_expected_term_matches"] = f"{baseline_rag_term_hits}/{total_terms}"
         summary["without_rag_expected_term_matches"] = f"{no_rag_term_hits}/{total_terms}"
+        summary["answers_with_sources"] = f"{answers_with_sources}/{len(results)}"
+        summary["answers_with_quotes"] = f"{answers_with_quotes}/{len(results)}"
+        summary["answers_aligned_with_quotes"] = f"{aligned_answers}/{len(results)}"
     return summary

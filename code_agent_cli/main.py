@@ -482,9 +482,9 @@ def print_mcp_help() -> None:
                     ("/mcp index-status", "показать статус локального индекса документов"),
                     ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
                     ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
-                    ("/mcp rag-answer QUESTION", "ответить с enhanced RAG-контекстом и sources"),
+                    ("/mcp rag-answer QUESTION", "ответить с verified sources/quotes или сказать Не знаю"),
                     ("/mcp rag-compare QUESTION", "сравнить Without RAG, Baseline RAG и Enhanced RAG"),
-                    ("/mcp rag-eval", "сравнить baseline/enhanced RAG на 10 контрольных вопросах"),
+                    ("/mcp rag-eval", "проверить sources, quotes и answer/quote alignment на 10 вопросах"),
                     ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
                 ),
             ),
@@ -1561,6 +1561,8 @@ def print_rag_search_result(payload: dict[str, Any]) -> None:
     print(colorize("RAG search", BOLD + ACCENT))
     print(status_line("Question", str(payload.get("question", "")), VALUE))
     print(status_line("Mode", str(payload.get("mode", "")), SUCCESS))
+    print(status_line("Grounding", str(payload.get("grounding_status", "")), SUCCESS))
+    print(status_line("Best similarity", str(payload.get("best_similarity", "")), VALUE))
     rewritten = str(payload.get("rewritten_question", ""))
     if rewritten:
         print_multiline_value("Rewrite", rewritten)
@@ -1589,10 +1591,13 @@ def print_rag_search_result(payload: dict[str, Any]) -> None:
 def print_rag_answer_result(payload: dict[str, Any]) -> None:
     print(colorize("RAG answer", BOLD + ACCENT))
     print(status_line("Mode", str(payload.get("mode", "")), SUCCESS))
+    print(status_line("Grounding", str(payload.get("grounding_status", "")), SUCCESS))
+    print(status_line("Best similarity", str(payload.get("best_similarity", "")), VALUE))
     print(status_line("Question", str(payload.get("question", "")), VALUE))
     print(status_line("Model", str(payload.get("model", "")), VALUE))
     print_multiline_value("Answer", str(payload.get("answer", "")))
     print_rag_sources(payload.get("sources"))
+    print_rag_quotes(payload.get("quotes"))
 
 
 def print_rag_compare_result(payload: dict[str, Any]) -> None:
@@ -1606,9 +1611,11 @@ def print_rag_compare_result(payload: dict[str, Any]) -> None:
     print()
     print_multiline_value("Baseline RAG", str(baseline_rag.get("answer", "")))
     print_rag_sources(baseline_rag.get("sources"))
+    print_rag_quotes(baseline_rag.get("quotes"))
     print()
     print_multiline_value("Enhanced RAG", str(with_rag.get("answer", "")))
     print_rag_sources(with_rag.get("sources"))
+    print_rag_quotes(with_rag.get("quotes"))
     retrieval_modes = payload.get("retrieval_modes")
     if isinstance(retrieval_modes, dict):
         print()
@@ -1681,6 +1688,18 @@ def print_rag_eval_result(payload: dict[str, Any]) -> None:
             )
             print(status_line("Baseline source hits", rendered_hits, VALUE))
         if item.get("with_rag"):
+            print(status_line("Enhanced grounding", str(item.get("with_rag_grounding_status", "")), VALUE))
+            print(status_line("Has sources", "yes" if item.get("with_rag_has_sources") else "no", VALUE))
+            print(status_line("Has quotes", "yes" if item.get("with_rag_has_quotes") else "no", VALUE))
+            alignment = item.get("with_rag_answer_quote_alignment")
+            if isinstance(alignment, dict):
+                print(
+                    status_line(
+                        "Answer/quote alignment",
+                        f"{'ok' if alignment.get('aligned') else 'weak'} score={alignment.get('score', '')}",
+                        VALUE,
+                    )
+                )
             print_multiline_value("Enhanced RAG", str(item.get("with_rag", "")))
         if item.get("baseline_rag"):
             print_multiline_value("Baseline RAG", str(item.get("baseline_rag", "")))
@@ -1707,6 +1726,25 @@ def print_rag_sources(value: Any) -> None:
                 VALUE,
             )
         )
+
+
+def print_rag_quotes(value: Any) -> None:
+    quotes = ensure_list(value)
+    if not quotes:
+        return
+    print()
+    print(status_line("Quotes", str(len(quotes)), SUCCESS))
+    for quote in quotes[:8]:
+        if not isinstance(quote, dict):
+            continue
+        print(
+            status_line(
+                str(quote.get("source", "")),
+                f"{quote.get('section', '')} · {quote.get('chunk_id', '')}",
+                VALUE,
+            )
+        )
+        print_multiline_value("Quote", str(quote.get("quote", "")))
 
 
 def print_multiline_value(label: str, text: str) -> None:
@@ -2713,9 +2751,9 @@ def print_help() -> None:
                     ("/mcp index-status", "показать статус локального индекса документов"),
                     ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
                     ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
-                    ("/mcp rag-answer QUESTION", "ответить с enhanced RAG-контекстом и sources"),
+                    ("/mcp rag-answer QUESTION", "ответить с verified sources/quotes или сказать Не знаю"),
                     ("/mcp rag-compare QUESTION", "сравнить Without RAG, Baseline RAG и Enhanced RAG"),
-                    ("/mcp rag-eval", "сравнить baseline/enhanced RAG на 10 контрольных вопросах"),
+                    ("/mcp rag-eval", "проверить sources, quotes и answer/quote alignment на 10 вопросах"),
                     ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
                 ),
             ),

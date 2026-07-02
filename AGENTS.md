@@ -121,13 +121,21 @@ Default RAG search uses enhanced retrieval:
 - `min_similarity` filters weak chunks;
 - heuristic rerank boosts chunks with matching terms in text, title, section and source.
 
+RAG answers must stay grounded:
+- return an answer plus verified `sources` and `quotes` in the JSON payload;
+- append `Verified Sources` and `Verified Quotes` to RAG answer text;
+- build quotes deterministically from retrieved chunks, not from model output;
+- if no retrieved chunk is strong enough for `min_similarity`, answer `Не знаю`
+  and ask the user to clarify or reindex relevant documents.
+
 Keep these comparison modes clear:
 - `Without RAG`: direct LLM answer without local context;
 - `Baseline RAG`: vector search only, without rewrite/filter/rerank;
 - `Enhanced RAG`: query rewrite plus similarity filter and heuristic rerank.
 
 Use `/mcp rag-compare QUESTION` to compare answer modes and `/mcp rag-eval` to
-compare baseline vs enhanced retrieval quality on the control questions.
+compare baseline vs enhanced retrieval quality on the control questions,
+including source presence, quote presence and answer/quote alignment.
 
 ## Verification
 

@@ -242,13 +242,26 @@ agent
 RAG flow:
 
 ```text
-question -> query rewrite -> Ollama embedding -> candidate chunks -> similarity filter + heuristic rerank -> LLM answer with sources
+question -> query rewrite -> Ollama embedding -> candidate chunks -> similarity filter + heuristic rerank -> LLM answer with verified sources and quotes
 ```
 
 По умолчанию RAG использует enhanced retrieval без отдельной reranker-модели:
 сначала берет `candidate_k` chunks, затем отсекает результаты ниже
 `min_similarity` и переупорядочивает оставшиеся chunks простыми эвристиками
 по совпадению терминов в тексте, title, section и source.
+
+RAG-ответы дополнительно возвращают проверяемое grounding-представление:
+
+```text
+Answer: ответ на вопрос
+Verified Sources: source / section / chunk_id
+Verified Quotes: короткие фрагменты из найденных chunks
+```
+
+Цитаты строятся детерминированно из найденных chunks, а не придумываются
+моделью. Если после фильтрации нет достаточно релевантного контекста или лучший
+`similarity` ниже `min_similarity`, RAG отвечает `Не знаю` и просит уточнить
+вопрос.
 
 Команда `/mcp rag-compare` показывает три ответа:
 
@@ -261,9 +274,10 @@ Enhanced RAG: ответ с query rewrite, similarity filter и heuristic rerank
 Команда `/mcp rag-eval` использует 10 контрольных вопросов по базе проекта.
 Для каждого вопроса зафиксированы ожидание, ключевые термины и ожидаемые
 источники. Итог показывает совпадения по источникам и ключевым терминам для
-baseline RAG, enhanced RAG и non-RAG ответов. Полный прогон делает LLM-запросы
-для каждого режима ответа, поэтому требует `DEEPSEEK_API_KEY` и может занять
-время.
+baseline RAG, enhanced RAG и non-RAG ответов, а также проверяет наличие
+источников, цитат и примерное совпадение смысла ответа с цитатами. Полный
+прогон делает LLM-запросы для каждого режима ответа, поэтому требует
+`DEEPSEEK_API_KEY` и может занять время.
 
 ## Встроенный mock HTTP API MCP
 
