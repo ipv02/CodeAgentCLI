@@ -137,6 +137,38 @@ Use `/mcp rag-compare QUESTION` to compare answer modes and `/mcp rag-eval` to
 compare baseline vs enhanced retrieval quality on the control questions,
 including source presence, quote presence and answer/quote alignment.
 
+## Context Chat Guidelines
+
+`agent --context-chat` is the user-facing mini-chat over the local document
+index. Keep the user-facing wording focused on "контекстный чат", "локальная
+база документов", "источники" and "цитаты"; avoid exposing the `RAG`
+abbreviation in this mode unless the user explicitly asks for implementation
+details.
+
+Per user message, context chat must:
+- embed the current question with local Ollama embeddings;
+- search the local SQLite document index before answering;
+- answer with DeepSeek using the question, recent dialogue history, task state,
+  working memory and retrieved chunks;
+- keep retrieved chunks out of task memory; only the user's clean message should
+  update memory/task state;
+- always show source and quote sections, including weak-context answers;
+- preserve dialogue history, goal, clarifications, constraints and fixed terms.
+
+The context chat commands must remain available and readable:
+- `/state`: formatted task state, working memory and recent history;
+- `/sources`: formatted sources and quotes for the last answer;
+- `/reset-context`: clear current dialogue/task memory while preserving profile.
+
+`agent --context-chat-check` is the production-like validation path. It should
+run two long real scenarios through Ollama, the SQLite index and DeepSeek:
+- `new_developer_onboarding`;
+- `requirements_brief`.
+
+The check should fail if any turn lacks local context, sources or quotes, or if
+the final turns/task memory lose the scenario goal. Keep progress output
+observable with per-turn `context=ok/weak`, source count and quote count.
+
 ## Verification
 
 Before finishing code changes, run the most relevant available check.
@@ -145,6 +177,7 @@ At minimum, for CLI-level changes, verify one of:
 
 ```bash
 agent --help
+agent --context-chat-check
 agent --mcp-config-tools
 agent "test prompt"
 ```
