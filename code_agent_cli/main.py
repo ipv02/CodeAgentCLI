@@ -49,6 +49,11 @@ from code_agent_cli.mcp_client import (
     call_mcp_tool,
     list_mcp_tools,
 )
+from code_agent_cli.rag_chat import (
+    RAGChatService,
+    run_rag_chat_production_check,
+)
+from code_agent_cli.rag_service import RAGError, RAGService
 from code_agent_cli.subagents import (
     MCPOrchestrationPlan,
     MCPOrchestrationStep,
@@ -196,7 +201,16 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.rag_chat_check:
+        if not run_rag_chat_check():
+            raise SystemExit(1)
+        return
+
     agent = CodeAgent()
+
+    if args.rag_chat:
+        run_rag_chat_session(agent)
+        return
 
     if args.prompt:
         prompt = build_prompt(args)
@@ -272,6 +286,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite existing MCP config when used with --mcp-init-apple.",
     )
+    parser.add_argument(
+        "--context-chat",
+        dest="rag_chat",
+        action="store_true",
+        help="Start an interactive mini-chat that searches the local document index before every answer.",
+    )
+    parser.add_argument(
+        "--rag-chat",
+        dest="rag_chat",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--context-chat-check",
+        dest="rag_chat_check",
+        action="store_true",
+        help="Run built-in long-scenario checks for local-context chat source and goal retention.",
+    )
+    parser.add_argument(
+        "--rag-chat-check",
+        dest="rag_chat_check",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -293,6 +331,17 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.mcp_config_tools
         or args.mcp_init_apple
     )
+    rag_mode_enabled = args.rag_chat or args.rag_chat_check
+    if rag_mode_enabled:
+        if args.rag_chat and args.rag_chat_check:
+            parser.error("--context-chat и --context-chat-check нельзя использовать одновременно.")
+        if args.prompt:
+            parser.error("Контекстный чат нельзя совмещать с prompt.")
+        if args.file is not None or args.line_range or args.force_file:
+            parser.error("Контекстный чат нельзя совмещать с --file, --range или --force-file.")
+        if mcp_mode_enabled:
+            parser.error("Контекстный чат нельзя совмещать с MCP-режимами.")
+
     if not mcp_mode_enabled:
         return
 
@@ -2340,6 +2389,345 @@ def run_interactive_session(agent: CodeAgent) -> None:
             continue
 
         send(agent, text)
+
+
+def run_rag_chat_session(agent: CodeAgent) -> None:
+    chat = RAGChatService(agent=agent, rag_service=RAGService())
+    last_result = None
+    print(colorize("Code Agent CLI · Контекстный чат", BOLD + ACCENT))
+    print_startup_summary(agent)
+    print()
+    print(indented_line("Каждый вопрос ищет фрагменты в локальной базе документов."))
+    print(indented_line("Ollama строит embedding вопроса, затем ответ собирается с источниками."))
+    print(indented_line("Команды: /state, /sources, /reset-context, /help, /exit"))
+
+    while True:
+        try:
+            text = input(prompt()).strip()
+            reset_terminal_color()
+        except (EOFError, KeyboardInterrupt):
+            reset_terminal_color()
+            print()
+            return
+
+        if not text:
+            continue
+
+        command, _, argument = text.partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+
+        if command in {"/exit", "/quit"}:
+            return
+        if command == "/help":
+            print_rag_chat_help()
+            continue
+        if command == "/state":
+            print_rag_chat_state(agent)
+            continue
+        if command == "/sources":
+            print_last_rag_chat_sources(last_result)
+            continue
+        if command in {"/reset-context", "/reset-rag"}:
+            agent.clear_short_term_memory()
+            agent.clear_working_memory()
+            last_result = None
+            print("История текущего диалога и working/task memory очищены. Профиль сохранен.")
+            continue
+        if command in {"/status", "/tokens", "/token", "/context", "/memory", "/task"}:
+            if command == "/status":
+                print_status(agent)
+            elif command in {"/tokens", "/token"}:
+                print_current_token_state(agent, argument or None)
+            elif command == "/context":
+                handle_context_command(agent, argument)
+            elif command == "/memory":
+                handle_memory_command(agent, argument)
+            elif command == "/task":
+                handle_task_command(agent, argument)
+            continue
+
+        last_result = send_rag_chat(chat, text)
+
+
+def send_rag_chat(chat: RAGChatService, text: str) -> Any | None:
+    try:
+        with loader("Ищу релевантный контекст и готовлю ответ"):
+            result = chat.send(text)
+    except ContextLimitExceededError as error:
+        print_context_limit_error(error.breakdown)
+        return None
+    except MissingAPIKeyError as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return None
+    except APIRequestError as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return None
+    except RAGError as error:
+        print(f"Ошибка поиска по базе: {error}", file=sys.stderr)
+        return None
+    except Exception as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return None
+
+    print()
+    print_rag_chat_turn(result, chat.agent)
+    print()
+    return result
+
+
+def print_rag_chat_turn(result: Any, agent: CodeAgent) -> None:
+    answer_body = strip_grounding_sections(str(result.answer))
+    print_rag_chat_banner(result)
+    print()
+    print_rag_chat_answer(answer_body)
+    print()
+    print_rag_chat_memory_summary(agent)
+    print()
+    print_rag_chat_sources_compact(result.sources)
+    print()
+    print_rag_chat_quotes_compact(result.quotes)
+    print()
+    print(colorize("Подробности: /sources · /state · /tokens", MUTED))
+
+
+def print_rag_chat_banner(result: Any) -> None:
+    grounded = result.grounding_status == "grounded"
+    label_color = SUCCESS if grounded else WARNING
+    title = "Контекст найден" if grounded else "Слабый контекст"
+    print(colorize(f"== {title} ==", BOLD + label_color))
+    print(status_line("similarity", f"{result.best_similarity:.4f}", VALUE))
+    print(status_line("sources", str(len(result.sources)), SUCCESS if result.sources else WARNING))
+    print(status_line("quotes", str(len(result.quotes)), SUCCESS if result.quotes else WARNING))
+
+
+def print_rag_chat_answer(text: str) -> None:
+    print(header_line("Ответ"))
+    for line in render_answer(text.strip()):
+        print(f"  {line}")
+
+
+def print_rag_chat_memory_summary(agent: CodeAgent) -> None:
+    task_state = agent.memory.task_state
+    print(header_line("Память задачи"))
+    print(status_line("stage", task_state.stage, SUCCESS))
+    if task_state.summary:
+        print_wrapped_status("goal", task_state.summary, VALUE)
+    if task_state.current_step:
+        print_wrapped_status("step", task_state.current_step, VALUE)
+    if task_state.expected_action:
+        print_wrapped_status("next", task_state.expected_action, VALUE)
+    constraints = agent.memory.working.get("temporary_constraints") or agent.memory.working.get("constraints")
+    terms = agent.memory.working.get("terms") or agent.memory.working.get("stable_constraints")
+    if constraints:
+        print_wrapped_status("constraints", constraints, VALUE)
+    if terms:
+        print_wrapped_status("terms", terms, VALUE)
+
+
+def print_rag_chat_sources_compact(value: Any) -> None:
+    sources = ensure_list(value)
+    print(header_line("Источники"))
+    if not sources:
+        print(indented_line("нет релевантных источников"))
+        return
+    for index, source in enumerate(sources[:5], start=1):
+        if not isinstance(source, dict):
+            continue
+        source_name = shorten_text(str(source.get("source", "")), 38)
+        section = str(source.get("section", "")).strip()
+        chunk_id = str(source.get("chunk_id", ""))
+        similarity = source.get("similarity", "")
+        print(command_line(f"{index}. {source_name}"))
+        if section:
+            print_wrapped_block(section, level=2)
+        print(indented_line(f"{chunk_id} · similarity={similarity}", level=2))
+
+
+def print_rag_chat_quotes_compact(value: Any) -> None:
+    quotes = ensure_list(value)
+    print(header_line("Цитаты"))
+    if not quotes:
+        print(indented_line("нет релевантных цитат"))
+        return
+    for index, quote in enumerate(quotes[:2], start=1):
+        if not isinstance(quote, dict):
+            continue
+        source = shorten_text(str(quote.get("source", "")), 38)
+        text = shorten_text(str(quote.get("quote", "")), 220)
+        print(command_line(f"{index}. {source}"))
+        print_wrapped_block(text, level=2)
+
+
+def print_rag_chat_quotes_detail(value: Any) -> None:
+    quotes = ensure_list(value)
+    print(header_line("Цитаты"))
+    if not quotes:
+        print(indented_line("нет релевантных цитат"))
+        return
+    for index, quote in enumerate(quotes[:5], start=1):
+        if not isinstance(quote, dict):
+            continue
+        source = str(quote.get("source", "")).strip()
+        section = str(quote.get("section", "")).strip()
+        chunk_id = str(quote.get("chunk_id", "")).strip()
+        similarity = quote.get("similarity", "")
+        print(command_line(f"{index}. {source or 'unknown source'}"))
+        meta = " · ".join(part for part in (section, chunk_id, f"similarity={similarity}") if part)
+        if meta:
+            print_wrapped_block(meta, level=2)
+        quote_text = str(quote.get("quote", "")).strip()
+        if quote_text:
+            print_wrapped_block(f"\"{quote_text}\"", level=2)
+
+
+def print_context_memory_items(layer: dict[str, str]) -> None:
+    if not layer:
+        print(indented_line("пока нет сохраненных уточнений"))
+        return
+    preferred_keys = (
+        "current_task",
+        "goal",
+        "temporary_constraints",
+        "constraints",
+        "terms",
+        "risks",
+        "files",
+        "state",
+    )
+    printed: set[str] = set()
+    for key in preferred_keys:
+        value = layer.get(key)
+        if value:
+            print_wrapped_status(format_memory_key(key), value)
+            printed.add(key)
+    for key in sorted(layer):
+        if key in printed:
+            continue
+        print_wrapped_status(format_memory_key(key), layer[key])
+
+
+def format_memory_key(key: str) -> str:
+    labels = {
+        "current_task": "current task",
+        "temporary_constraints": "constraints",
+    }
+    return labels.get(key, key.replace("_", " "))
+
+
+def print_wrapped_status(label: str, text: str, value_color: str = VALUE, *, level: int = 0) -> None:
+    clean_text = " ".join(str(text).split())
+    if not clean_text:
+        print(status_line(label, "пусто", WARNING))
+        return
+    width = max(DEFAULT_WRAP_WIDTH - 24 - (level * 2), 44)
+    wrapped = textwrap.wrap(clean_text, width=width) or [clean_text]
+    print(status_line(label, wrapped[0], value_color))
+    continuation_indent = " " * (len(label) + 2 + (level * 2))
+    for line in wrapped[1:]:
+        if use_color():
+            print(f"{MUTED}{continuation_indent}{RESET}{value_color}{line}{RESET}")
+        else:
+            print(f"{continuation_indent}{line}")
+
+
+def print_wrapped_block(text: str, *, level: int = 1, width: int | None = None) -> None:
+    clean_text = " ".join(str(text).split())
+    if not clean_text:
+        return
+    effective_width = width or max(DEFAULT_WRAP_WIDTH - (level * 2), 44)
+    for line in textwrap.wrap(clean_text, width=effective_width) or [clean_text]:
+        print(indented_line(line, level=level))
+
+
+def strip_grounding_sections(answer: str) -> str:
+    cut_at = len(answer)
+    for marker in ("Verified Sources:", "Verified Quotes:"):
+        index = answer.find(marker)
+        if index >= 0:
+            cut_at = min(cut_at, index)
+    return answer[:cut_at].strip()
+
+
+def print_rag_chat_help() -> None:
+    print_command_help_grouped_section(
+        "Контекстный чат",
+        (
+            (
+                "Commands",
+                (
+                    ("/state", "показать task state и рабочую память"),
+                    ("/sources", "показать источники последнего ответа"),
+                    ("/reset-context", "очистить историю текущего диалога и task memory"),
+                    ("/status", "показать статус агента"),
+                    ("/exit", "выйти из контекстного чата"),
+                ),
+            ),
+        ),
+    )
+
+
+def print_rag_chat_state(agent: CodeAgent) -> None:
+    print(header_line("Состояние контекстного чата"))
+    task_state = agent.memory.task_state
+    print(subheader_line("Память задачи"))
+    print(status_line("stage", task_state.stage, SUCCESS))
+    print_wrapped_status("goal", task_state.summary or "не задана", VALUE if task_state.summary else WARNING)
+    print_wrapped_status("current step", task_state.current_step or "не задан", VALUE if task_state.current_step else WARNING)
+    print_wrapped_status("expected action", task_state.expected_action or "не задано", VALUE if task_state.expected_action else WARNING)
+    if task_state.previous_stage:
+        print(status_line("previous stage", task_state.previous_stage, MUTED))
+    allowed_next = ", ".join(task_state.allowed_next_stages())
+    if allowed_next:
+        print(status_line("allowed next", allowed_next, VALUE))
+
+    print()
+    print(subheader_line("Уточнения, ограничения, термины"))
+    print_context_memory_items(agent.memory.working)
+    print()
+    print(subheader_line("История"))
+    visible_messages = [
+        message
+        for message in agent.messages
+        if message.get("role") in {"user", "assistant"}
+    ]
+    print(status_line("messages", f"{len(visible_messages)} / {agent.max_history_messages}", VALUE))
+    if visible_messages:
+        for message in visible_messages[-4:]:
+            role = str(message.get("role", ""))
+            content = shorten_text(str(message.get("content", "")), 120)
+            print_wrapped_status(role, content, MUTED)
+
+
+def print_last_rag_chat_sources(result: Any | None) -> None:
+    if result is None:
+        print("Источников последнего ответа пока нет.")
+        return
+    print_rag_chat_sources_compact(result.sources)
+    print()
+    print_rag_chat_quotes_detail(result.quotes)
+
+
+def run_rag_chat_check() -> bool:
+    def print_progress(message: str) -> None:
+        print(indented_line(message), flush=True)
+
+    payload = run_rag_chat_production_check(progress_callback=print_progress)
+    print(flush=True)
+    print(header_line("Проверка контекстного чата"))
+    print(status_line("Scenarios", str(payload["scenarios"]), VALUE))
+    print(status_line("Status", "OK" if payload["ok"] else "FAILED", SUCCESS if payload["ok"] else ERROR))
+    print()
+    for result in payload["results"]:
+        print(command_line(str(result["scenario"])))
+        print(indented_line(f"messages: {result['messages']}"))
+        print(indented_line(f"answers: {result['answers']}"))
+        print(indented_line(f"turns with context: {result.get('grounded_turns', 0)}"))
+        print(indented_line(f"ok: {result['ok']}"))
+        failures = result.get("failures") or []
+        for failure in failures:
+            print(indented_line(str(failure), level=2))
+    return bool(payload["ok"])
 
 
 def build_prompt(args: argparse.Namespace) -> PromptPayload:

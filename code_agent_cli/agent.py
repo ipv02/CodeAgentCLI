@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import ssl
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -120,6 +123,26 @@ def https_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
+@contextmanager
+def request_deadline(timeout_seconds: float) -> Iterator[None]:
+    if timeout_seconds <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+
+    def raise_timeout(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"LLM API timeout after {timeout_seconds:.1f}s")
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 @dataclass
 class CodeAgent:
     api_key: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""))
@@ -155,6 +178,7 @@ class CodeAgent:
         default_factory=lambda: env_float("CODE_AGENT_OUTPUT_PRICE_PER_1M", 0.42)
     )
     temperature: float = field(default_factory=lambda: env_float("CODE_AGENT_TEMPERATURE", 0.2))
+    api_timeout: float = field(default_factory=lambda: env_float("CODE_AGENT_API_TIMEOUT", 120.0))
     history_file: Path = field(default_factory=default_history_file)
     profile_file: Path = field(default_factory=default_profile_file)
     invariants_file: Path = field(default_factory=default_invariants_file)
@@ -194,19 +218,41 @@ class CodeAgent:
         self._trim_history_if_needed()
 
     def send_message(self, text: str, history_text: str | None = None) -> str:
-        user_message = self._message("user", history_text or text)
-        request_messages = self._request_messages_for_user_message(user_message, text)
+        return self.send_prepared_message(
+            request_text=text,
+            user_text=text,
+            history_text=history_text,
+        )
+
+    def send_prepared_message(
+        self,
+        *,
+        request_text: str,
+        user_text: str,
+        history_text: str | None = None,
+        answer_postprocessor: Callable[[str], str] | None = None,
+        response_max_tokens: int | None = None,
+        enforce_task_lifecycle: bool = True,
+    ) -> str:
+        def finalize_answer(answer: str) -> str:
+            if answer_postprocessor is None:
+                return answer
+            return answer_postprocessor(answer)
+
+        user_message = self._message("user", history_text or user_text)
+        request_messages = self._request_messages_for_user_message(user_message, request_text)
         self.last_token_breakdown = self.token_counter.build_breakdown(
             request_messages,
-            text,
+            request_text,
         )
         self.last_actual_usage = {}
 
         if not self.last_token_breakdown.fits_context:
             raise ContextLimitExceededError(self.last_token_breakdown)
 
-        conflict_answer = self._refuse_if_heuristic_invariant_conflict(text)
+        conflict_answer = self._refuse_if_heuristic_invariant_conflict(user_text)
         if conflict_answer is not None:
+            conflict_answer = finalize_answer(conflict_answer)
             self._save_answer_to_history(user_message, conflict_answer)
             return conflict_answer
 
@@ -215,46 +261,58 @@ class CodeAgent:
                 'Не задан DEEPSEEK_API_KEY. Выполните: export DEEPSEEK_API_KEY="ваш_ключ"'
             )
 
-        conflict_answer = self._refuse_if_invariant_conflict(text)
+        conflict_answer = self._refuse_if_invariant_conflict(user_text)
         if conflict_answer is not None:
+            conflict_answer = finalize_answer(conflict_answer)
             self._save_answer_to_history(user_message, conflict_answer)
             return conflict_answer
 
         task_was_empty = self.memory.task_state.is_empty
         stage_before_request = self.memory.task_state.stage
-        task_lifecycle_answer = self._update_task_state_before_request(text)
+        task_lifecycle_answer = self._update_task_state_before_request(user_text)
         if task_lifecycle_answer is not None:
+            task_lifecycle_answer = finalize_answer(task_lifecycle_answer)
             self._save_answer_to_history(user_message, task_lifecycle_answer)
             return task_lifecycle_answer
         stage_changed_before_request = stage_before_request != self.memory.task_state.stage
-        lifecycle_answer = self._refuse_if_task_lifecycle_conflict(text, task_was_empty)
+        lifecycle_answer = (
+            self._refuse_if_task_lifecycle_conflict(user_text, task_was_empty)
+            if enforce_task_lifecycle
+            else None
+        )
         if lifecycle_answer is not None:
+            lifecycle_answer = finalize_answer(lifecycle_answer)
             self._save_answer_to_history(user_message, lifecycle_answer)
             return lifecycle_answer
         stage_changed_before_request = (
             stage_changed_before_request
             or stage_before_request != self.memory.task_state.stage
         )
-        if stage_changed_before_request and self.task_state_agent.is_pause_intent(text):
+        if stage_changed_before_request and self.task_state_agent.is_pause_intent(user_text):
             answer = self._build_task_pause_answer()
+            answer = finalize_answer(answer)
             self._save_answer_to_history(user_message, answer)
             return answer
 
-        self._update_memory_if_needed(text)
-        request_messages = self._request_messages_for_user_message(user_message, text)
+        self._update_memory_if_needed(user_text)
+        request_messages = self._request_messages_for_user_message(user_message, request_text)
         self.last_token_breakdown = self.token_counter.build_breakdown(
             request_messages,
-            text,
+            request_text,
         )
         if not self.last_token_breakdown.fits_context:
             raise ContextLimitExceededError(self.last_token_breakdown)
 
-        answer, usage = self.response_agent.run(self._perform_request, request_messages)
+        if response_max_tokens is None:
+            answer, usage = self.response_agent.run(self._perform_request, request_messages)
+        else:
+            answer, usage = self._perform_request(request_messages, response_max_tokens)
+        answer = finalize_answer(answer)
 
         self.last_actual_usage = usage
         self.token_usage.add(usage)
         self._update_task_state_after_answer(
-            text,
+            user_text,
             answer,
             suppress_stage_advance=stage_changed_before_request,
         )
@@ -304,6 +362,29 @@ class CodeAgent:
         self.last_actual_usage = {}
         self._save_history()
         return answer
+
+    def save_external_turn(
+        self,
+        user_text: str,
+        answer: str,
+        *,
+        history_text: str | None = None,
+        update_memory: bool = True,
+    ) -> None:
+        user_message = self._message("user", history_text or user_text)
+        if update_memory:
+            self._update_task_state_before_request(user_text)
+            self._update_memory_if_needed(user_text)
+            self._update_task_state_after_answer(user_text, answer)
+        self.messages = [
+            *self.messages,
+            user_message,
+            self._message("assistant", answer),
+        ]
+        self._trim_history_if_needed()
+        self.last_token_breakdown = None
+        self.last_actual_usage = {}
+        self._save_history()
 
     def status(self) -> dict[str, str | int | float | bool]:
         current_history_tokens = self.token_counter.count_messages(
@@ -419,8 +500,9 @@ class CodeAgent:
         )
 
         try:
-            with urlopen(request, timeout=120, context=https_ssl_context()) as response:
-                response_text = response.read().decode("utf-8")
+            with request_deadline(self.api_timeout):
+                with urlopen(request, timeout=self.api_timeout, context=https_ssl_context()) as response:
+                    response_text = response.read().decode("utf-8")
         except HTTPError as error:
             response_text = error.read().decode("utf-8")
             raise APIRequestError(error.code, format_api_error(error.code, response_text)) from error
