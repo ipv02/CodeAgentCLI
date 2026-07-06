@@ -29,6 +29,11 @@ from code_agent_cli.agent import (
     ContextLimitExceededError,
     MissingAPIKeyError,
 )
+from code_agent_cli.local_llm import (
+    DEFAULT_LOCAL_MODEL,
+    LocalLLMChatService,
+    LocalLLMError,
+)
 from code_agent_cli.mcp_config import (
     MCPConfig,
     MCPConfigError,
@@ -206,6 +211,10 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.local_chat:
+        run_local_chat_session(args.local_model)
+        return
+
     agent = CodeAgent()
 
     if args.rag_chat:
@@ -310,6 +319,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--local-chat",
+        action="store_true",
+        help="Start an interactive chat with a local Ollama model. Defaults to llama3.2:3b.",
+    )
+    parser.add_argument(
+        "--local-model",
+        default=None,
+        help="Ollama model for --local-chat. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b.",
+    )
     return parser
 
 
@@ -331,6 +350,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.mcp_config_tools
         or args.mcp_init_apple
     )
+    local_mode_enabled = args.local_chat
+    if args.local_model and not args.local_chat:
+        parser.error("--local-model можно использовать только вместе с --local-chat.")
+
     rag_mode_enabled = args.rag_chat or args.rag_chat_check
     if rag_mode_enabled:
         if args.rag_chat and args.rag_chat_check:
@@ -341,6 +364,16 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Контекстный чат нельзя совмещать с --file, --range или --force-file.")
         if mcp_mode_enabled:
             parser.error("Контекстный чат нельзя совмещать с MCP-режимами.")
+
+    if local_mode_enabled:
+        if args.prompt:
+            parser.error("Локальный чат нельзя совмещать с prompt.")
+        if args.file is not None or args.line_range or args.force_file:
+            parser.error("Локальный чат нельзя совмещать с --file, --range или --force-file.")
+        if mcp_mode_enabled:
+            parser.error("Локальный чат нельзя совмещать с MCP-режимами.")
+        if rag_mode_enabled:
+            parser.error("Локальный чат нельзя совмещать с контекстным чатом.")
 
     if not mcp_mode_enabled:
         return
@@ -2450,6 +2483,105 @@ def run_rag_chat_session(agent: CodeAgent) -> None:
         last_result = send_rag_chat(chat, text)
 
 
+def run_local_chat_session(model: str | None = None) -> None:
+    chat = LocalLLMChatService(model=model) if model else LocalLLMChatService()
+    print(colorize("Code Agent CLI · Локальный чат", BOLD + ACCENT))
+    print(status_line("Модель", chat.model, VALUE))
+    print(status_line("Ollama", chat.ollama_url, VALUE))
+    print(status_line("Temperature", str(chat.temperature), VALUE))
+    print(indented_line("Команды: /model, /reset, /help, /exit"))
+    print(indented_line("Подсказка: если модель не скачана, выполните: ollama pull " + chat.model))
+
+    while True:
+        try:
+            text = input(prompt()).strip()
+            reset_terminal_color()
+        except (EOFError, KeyboardInterrupt):
+            reset_terminal_color()
+            print()
+            return
+
+        if not text:
+            continue
+
+        command, _, argument = text.partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+
+        if command in {"/exit", "/quit"}:
+            return
+        if command == "/help":
+            print_local_chat_help(chat)
+            continue
+        if command == "/model":
+            print_local_chat_status(chat)
+            continue
+        if command == "/reset":
+            chat.reset()
+            print("История локального чата очищена.")
+            continue
+        if command == "/pull":
+            print("Скачивание моделей выполняется из shell: ollama pull " + chat.model)
+            continue
+        if command == "/ollama-url":
+            if not argument:
+                print(status_line("Ollama", chat.ollama_url, VALUE))
+                continue
+            print("URL задается перед запуском через CODE_AGENT_OLLAMA_URL.")
+            continue
+
+        send_local_chat(chat, text)
+
+
+def send_local_chat(chat: LocalLLMChatService, text: str) -> None:
+    try:
+        with loader("Спрашиваю локальную модель"):
+            answer = chat.send(text)
+    except LocalLLMError as error:
+        print(f"Ошибка локальной модели: {error}", file=sys.stderr)
+        return
+    except Exception as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return
+
+    print()
+    print(header_line("Ответ"))
+    for line in render_answer(answer):
+        print(f"  {line}")
+    print()
+
+
+def print_local_chat_help(chat: LocalLLMChatService) -> None:
+    print_section(
+        "Локальный чат",
+        (
+            "agent --local-chat",
+            f"agent --local-chat --local-model {chat.model}",
+            "CODE_AGENT_OLLAMA_URL=http://127.0.0.1:11434 agent --local-chat",
+        ),
+    )
+    print()
+    print_command_help_section(
+        "Команды",
+        (
+            ("/model", "показать локальную модель и адрес Ollama"),
+            ("/reset", "очистить историю текущего локального чата"),
+            ("/pull", "показать команду скачивания текущей модели"),
+            ("/exit", "выйти"),
+        ),
+    )
+    print()
+    print_local_chat_status(chat)
+
+
+def print_local_chat_status(chat: LocalLLMChatService) -> None:
+    print(header_line("Локальная модель"))
+    print(status_line("Модель", chat.model, VALUE))
+    print(status_line("Ollama", chat.ollama_url, VALUE))
+    print(status_line("История", f"{max(len(chat.messages) - 1, 0)} сообщений"))
+    print(status_line("Timeout", f"{chat.timeout:.0f} сек"))
+
+
 def send_rag_chat(chat: RAGChatService, text: str) -> Any | None:
     try:
         with loader("Ищу релевантный контекст и готовлю ответ"):
@@ -3007,6 +3139,7 @@ def print_help() -> None:
             'agent "объясни, чем struct отличается от class в Swift"',
             'agent --file Sources/App.swift "найди ошибки"',
             'agent --file Sources/App.swift --range 40:120 "проверь этот участок"',
+            "agent --local-chat",
             "agent --mcp-tools path/to/server.py",
         ),
     )
@@ -3152,13 +3285,53 @@ def print_help() -> None:
 
 
 def print_ollama_help() -> None:
-    print_command_help_section(
+    print_command_help_grouped_section(
         "Ollama",
         (
-            ("Модель", "nomic-embed-text для embeddings в /mcp index-docs"),
-            ("ollama serve", "запустить локальный server на 127.0.0.1:11434"),
-            ("Ctrl+C", "остановить server, если он запущен вручную через ollama serve"),
-            ("address already in use", "Ollama уже запущена; второй server на том же порту не стартует"),
+            (
+                "Локальный чат",
+                (
+                    ("ollama serve", "запустить локальный server на 127.0.0.1:11434"),
+                    (f"ollama pull {DEFAULT_LOCAL_MODEL}", "скачать модель локального чата"),
+                    ("ollama list", "проверить установленные локальные модели"),
+                    ("agent --local-chat", f"запустить чат с {DEFAULT_LOCAL_MODEL}"),
+                    ("agent --local-chat --local-model MODEL", "запустить чат с другой Ollama-моделью"),
+                    ("CODE_AGENT_LOCAL_MODEL=MODEL agent --local-chat", "выбрать модель через переменную окружения"),
+                    ("CODE_AGENT_OLLAMA_URL=URL agent --local-chat", "выбрать другой адрес Ollama API"),
+                ),
+            ),
+            (
+                "Проверка",
+                (
+                    ("ollama list", "показать установленные модели"),
+                    (f"ollama run {DEFAULT_LOCAL_MODEL}", "быстрый CLI-запрос"),
+                    (
+                        "HTTP API",
+                        "curl http://127.0.0.1:11434/api/chat "
+                        "-H 'Content-Type: application/json' "
+                        "-d '{\"model\":\"llama3.2:3b\",\"messages\":[{\"role\":\"user\",\"content\":\"Ответь одним предложением: что такое локальная LLM?\"}],\"stream\":false}'",
+                    ),
+                ),
+            ),
+            (
+                "Команды локального чата",
+                (
+                    ("/model", "показать модель и адрес Ollama"),
+                    ("/reset", "очистить историю локального чата"),
+                    ("/pull", "показать команду скачивания модели"),
+                    ("/help", "показать помощь локального чата"),
+                    ("/exit", "выйти"),
+                ),
+            ),
+            (
+                "Индексация документов",
+                (
+                    ("Модель", "nomic-embed-text для embeddings в /mcp index-docs"),
+                    ("ollama pull nomic-embed-text", "скачать embedding-модель для локальной базы документов"),
+                    ("address already in use", "Ollama уже запущена; второй server на том же порту не стартует"),
+                    ("Ctrl+C", "остановить server, если он запущен вручную через ollama serve"),
+                ),
+            ),
         ),
     )
 

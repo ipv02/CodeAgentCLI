@@ -10,6 +10,7 @@ It includes:
 - local history, profile memory and invariants;
 - MCP stdio server configuration and tool listing;
 - Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
+- local Ollama chat mode for running a local LLM through `agent --local-chat`;
 - token counting and context-limit checks;
 - internal subagent prompts for response, memory and task state.
 
@@ -26,6 +27,7 @@ Main responsibility areas:
 - local history, profile memory, task state and invariants;
 - MCP config loading, validation and stdio client integration;
 - local document indexing, retrieval, query rewriting, filtering and RAG evaluation;
+- local LLM chat through Ollama;
 - internal subagent prompts and state-update logic.
 
 Keep these boundaries intact unless the task explicitly requires architectural changes. Before editing, inspect the relevant files instead of relying only on this guide.
@@ -55,6 +57,14 @@ Check MCP config tools:
 
 ```bash
 agent --mcp-config-tools
+```
+
+Run local Ollama chat:
+
+```bash
+ollama serve
+ollama pull llama3.2:3b
+agent --local-chat
 ```
 
 ## Development Guidelines
@@ -169,6 +179,28 @@ The check should fail if any turn lacks local context, sources or quotes, or if
 the final turns/task memory lose the scenario goal. Keep progress output
 observable with per-turn `context=ok/weak`, source count and quote count.
 
+## Local LLM Chat Guidelines
+
+`agent --local-chat` is the user-facing mini-chat for a local Ollama model.
+The default model is `llama3.2:3b`; allow overriding it with `--local-model`
+or `CODE_AGENT_LOCAL_MODEL`.
+
+Keep this mode separate from the default DeepSeek-backed chat and from
+`agent --context-chat`:
+- it must not require `DEEPSEEK_API_KEY`;
+- it should call the local Ollama API, defaulting to `http://127.0.0.1:11434`;
+- it should preserve only the current local chat history in-process;
+- it should not update profile memory, task state or invariants;
+- it should keep user-facing wording focused on "локальный чат", "локальная
+  модель" and "Ollama".
+
+The local chat commands must remain available and readable:
+- `/model`: show the selected model, Ollama URL, history size and timeout;
+- `/reset`: clear the current local chat history;
+- `/pull`: show the shell command for downloading the selected model;
+- `/help`: show local chat help;
+- `/exit`: exit the local chat.
+
 ## Verification
 
 Before finishing code changes, run the most relevant available check.
@@ -177,6 +209,7 @@ At minimum, for CLI-level changes, verify one of:
 
 ```bash
 agent --help
+agent --local-chat
 agent --context-chat-check
 agent --mcp-config-tools
 agent "test prompt"

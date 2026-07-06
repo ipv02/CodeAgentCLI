@@ -199,6 +199,65 @@ ollama serve
 ollama pull nomic-embed-text
 ```
 
+### Локальный чат через Ollama
+
+Для локального чата без внешнего LLM API можно использовать Ollama-модель.
+По умолчанию CodeAgentCLI использует `llama3.2:3b`:
+
+```bash
+ollama serve
+ollama pull llama3.2:3b
+agent --local-chat
+```
+
+Быстрая проверка перед запуском чата:
+
+```bash
+ollama list
+ollama run llama3.2:3b "Сколько будет 17 * 23? Ответь кратко."
+```
+
+Проверка HTTP API:
+
+```bash
+curl http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"Ответь одним предложением: что такое локальная LLM?"}],"stream":false}'
+```
+
+Выбрать другую модель можно флагом или переменной окружения:
+
+```bash
+agent --local-chat --local-model qwen2.5-coder:3b
+CODE_AGENT_LOCAL_MODEL=qwen2.5-coder:3b agent --local-chat
+```
+
+Команды внутри режима:
+
+```text
+/model   показать локальную модель и адрес Ollama
+/reset   очистить историю текущего локального чата
+/pull    показать команду скачивания текущей модели
+/help
+/exit
+```
+
+`agent --local-chat` обращается к локальному Ollama API
+`http://127.0.0.1:11434` и не требует `DEEPSEEK_API_KEY`. Это обычный чат с
+локальной моделью. Для ответов с поиском по локальной базе документов
+используйте `agent --context-chat`.
+
+Пример ручной проверки внутри `agent --local-chat`:
+
+```text
+Ответь одним предложением: что такое локальная LLM?
+Объясни в 3 пунктах, зачем нужен health check для CLI-приложения.
+Напиши короткую Python-функцию is_even(n: int) -> bool и один пример использования.
+/model
+/reset
+/exit
+```
+
 Подключить pipeline MCP и построить индекс проекта:
 
 ```text
