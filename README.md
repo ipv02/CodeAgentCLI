@@ -244,8 +244,8 @@ CODE_AGENT_LOCAL_MODEL=qwen2.5-coder:3b agent --local-chat
 
 `agent --local-chat` обращается к локальному Ollama API
 `http://127.0.0.1:11434` и не требует `DEEPSEEK_API_KEY`. Это обычный чат с
-локальной моделью. Для ответов с поиском по локальной базе документов
-используйте `agent --context-chat`.
+локальной моделью. Для ответов с поиском по локальной базе документов и
+локальной генерацией используйте `agent --local-context-chat`.
 
 Пример ручной проверки внутри `agent --local-chat`:
 
@@ -432,12 +432,33 @@ Verified Quotes: короткие фрагменты из найденных chu
 `similarity` ниже `min_similarity`, RAG отвечает `Не знаю` и просит уточнить
 вопрос.
 
-Команда `/mcp rag-compare` показывает три ответа:
+Полностью локальный RAG-флоу:
 
 ```text
-Without RAG: ответ модели без локального контекста
-Baseline RAG: ответ с обычным vector search без rewrite/filter/rerank
-Enhanced RAG: ответ с query rewrite, similarity filter и heuristic rerank
+question -> query rewrite -> Ollama embedding -> SQLite chunks -> similarity filter + heuristic rerank -> Ollama answer -> verified sources/quotes
+```
+
+Запуск интерактивного режима:
+
+```bash
+agent --local-context-chat
+agent --local-context-chat --local-model qwen2.5-coder:3b
+```
+
+MCP shortcut для одного локального ответа:
+
+```text
+/mcp rag-answer-local "Где хранится SQLite-индекс документов?"
+```
+
+Команда `/mcp rag-compare` показывает локальную генерацию и, если задан
+`DEEPSEEK_API_KEY`, облачную генерацию на найденном контексте:
+
+```text
+Local model: ответ локальной модели без локального контекста
+Local baseline RAG: локальная модель + обычный vector search без rewrite/filter/rerank
+Local enhanced RAG: локальная модель + query rewrite, similarity filter и heuristic rerank
+Cloud model / Cloud baseline RAG / Cloud enhanced RAG: облачное сравнение, если доступно
 ```
 
 Команда `/mcp rag-eval` использует 10 контрольных вопросов по базе проекта.
@@ -445,8 +466,7 @@ Enhanced RAG: ответ с query rewrite, similarity filter и heuristic rerank
 источники. Итог показывает совпадения по источникам и ключевым терминам для
 baseline RAG, enhanced RAG и non-RAG ответов, а также проверяет наличие
 источников, цитат и примерное совпадение смысла ответа с цитатами. Полный
-прогон делает LLM-запросы для каждого режима ответа, поэтому требует
-`DEEPSEEK_API_KEY` и может занять время.
+прогон делает LLM-запросы для каждого режима ответа и может занять время.
 
 ## Встроенный mock HTTP API MCP
 

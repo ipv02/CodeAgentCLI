@@ -139,6 +139,8 @@ def rag_answer(
     candidate_k: int = 12,
     min_similarity: float = 0.35,
     mode: str = "enhanced",
+    generation_provider: str = "cloud",
+    local_model: str | None = None,
 ) -> dict[str, Any]:
     return service().rag_answer(
         question,
@@ -147,6 +149,8 @@ def rag_answer(
         candidate_k=candidate_k,
         min_similarity=min_similarity,
         mode=mode,
+        generation_provider=generation_provider,
+        local_model=local_model,
     )
 
 
@@ -159,12 +163,14 @@ def rag_compare(
     top_k: int = 5,
     candidate_k: int = 12,
     min_similarity: float = 0.35,
+    local_model: str | None = None,
 ) -> dict[str, Any]:
     return service().rag_compare(
         question,
         top_k=top_k,
         candidate_k=candidate_k,
         min_similarity=min_similarity,
+        local_model=local_model,
     )
 
 

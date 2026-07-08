@@ -61,9 +61,16 @@ class LocalLLMChatService:
     def send(self, text: str) -> str:
         user_message = {"role": "user", "content": text}
         request_messages = [*self.messages, user_message]
+        answer = self.generate(request_messages)
+
+        self.messages = [*request_messages, {"role": "assistant", "content": answer}]
+        self._trim_history()
+        return answer
+
+    def generate(self, messages: list[dict[str, str]]) -> str:
         payload = {
             "model": self.model,
-            "messages": request_messages,
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": self.temperature,
@@ -76,9 +83,6 @@ class LocalLLMChatService:
         answer = str(message.get("content") or "").strip()
         if not answer:
             answer = "Ollama вернула пустой ответ."
-
-        self.messages = [*request_messages, {"role": "assistant", "content": answer}]
-        self._trim_history()
         return answer
 
     def reset(self) -> None:

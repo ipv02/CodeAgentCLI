@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Callable
 
 from code_agent_cli.agent import CodeAgent
+from code_agent_cli.local_llm import LocalLLMChatService
 from code_agent_cli.rag_service import (
     DEFAULT_RAG_CANDIDATE_K,
     DEFAULT_RAG_MIN_SIMILARITY,
@@ -14,6 +15,7 @@ from code_agent_cli.rag_service import (
     RAGError,
     RAGService,
     append_grounding_sections,
+    generate_local_rag_llm_answer,
     render_quotes,
     render_rag_context,
     render_sources,
@@ -44,6 +46,8 @@ class RAGChatTurnResult:
     quotes: list[dict[str, Any]]
     grounding_status: str
     best_similarity: float
+    generation_provider: str = "cloud"
+    model: str = ""
 
 
 @dataclass
@@ -54,6 +58,7 @@ class RAGChatService:
     candidate_k: int = DEFAULT_RAG_CANDIDATE_K
     min_similarity: float = DEFAULT_RAG_MIN_SIMILARITY
     response_max_tokens: int | None = None
+    local_llm: LocalLLMChatService | None = None
 
     def send(self, user_text: str) -> RAGChatTurnResult:
         clean_text = user_text.strip()
@@ -61,7 +66,12 @@ class RAGChatService:
             raise RAGError("question не должен быть пустым.")
 
         try:
-            retrieval = self.rag_service.search(
+            search_method = (
+                self.rag_service.search_local
+                if self.local_llm is not None
+                else self.rag_service.search
+            )
+            retrieval = search_method(
                 clean_text,
                 top_k=self.top_k,
                 candidate_k=self.candidate_k,
@@ -89,6 +99,8 @@ class RAGChatService:
                 quotes=[],
                 grounding_status="weak_context",
                 best_similarity=0.0,
+                generation_provider=self.generation_provider,
+                model=self.generation_model,
             )
         chunks = [
             chunk
@@ -118,6 +130,8 @@ class RAGChatService:
                 quotes=quotes,
                 grounding_status=grounding_status,
                 best_similarity=round(best_similarity, 4),
+                generation_provider=self.generation_provider,
+                model=self.generation_model,
             )
 
         request_text = build_rag_chat_request(
@@ -126,21 +140,35 @@ class RAGChatService:
             retrieved_chunks=chunks,
         )
 
-        def add_grounding(answer: str) -> str:
-            return append_grounding_sections(
-                strip_duplicate_grounding_sections(answer),
+        if self.local_llm is not None:
+            llm_payload = generate_local_rag_llm_answer(
+                clean_text,
+                retrieved_chunks=chunks,
+                use_rag=True,
+                local_model=self.local_llm.model,
+            )
+            answer = append_grounding_sections(
+                strip_duplicate_grounding_sections(str(llm_payload["content"])),
                 sources=sources,
                 quotes=quotes,
             )
+            self.agent.save_external_turn(clean_text, answer, update_memory=False)
+        else:
+            def add_grounding(answer: str) -> str:
+                return append_grounding_sections(
+                    strip_duplicate_grounding_sections(answer),
+                    sources=sources,
+                    quotes=quotes,
+                )
 
-        answer = self.agent.send_prepared_message(
-            request_text=request_text,
-            user_text=clean_text,
-            history_text=clean_text,
-            answer_postprocessor=add_grounding,
-            response_max_tokens=self.response_max_tokens,
-            enforce_task_lifecycle=False,
-        )
+            answer = self.agent.send_prepared_message(
+                request_text=request_text,
+                user_text=clean_text,
+                history_text=clean_text,
+                answer_postprocessor=add_grounding,
+                response_max_tokens=self.response_max_tokens,
+                enforce_task_lifecycle=False,
+            )
         return RAGChatTurnResult(
             answer=answer,
             retrieval=retrieval,
@@ -148,7 +176,17 @@ class RAGChatService:
             quotes=quotes,
             grounding_status=grounding_status,
             best_similarity=round(best_similarity, 4),
+            generation_provider=self.generation_provider,
+            model=self.generation_model,
         )
+
+    @property
+    def generation_provider(self) -> str:
+        return "local" if self.local_llm is not None else "cloud"
+
+    @property
+    def generation_model(self) -> str:
+        return self.local_llm.model if self.local_llm is not None else self.agent.model
 
 
 def build_rag_chat_request(

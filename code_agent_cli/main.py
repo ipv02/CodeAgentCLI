@@ -211,6 +211,14 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.local_context_chat:
+        run_rag_chat_session(
+            CodeAgent(auto_memory_updates=False, auto_task_state_updates=False),
+            local_generation=True,
+            local_model=args.local_model,
+        )
+        return
+
     if args.local_chat:
         run_local_chat_session(args.local_model)
         return
@@ -325,9 +333,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start an interactive chat with a local Ollama model. Defaults to llama3.2:3b.",
     )
     parser.add_argument(
+        "--local-context-chat",
+        action="store_true",
+        help="Start a fully local context chat: local document retrieval plus local Ollama answer generation.",
+    )
+    parser.add_argument(
         "--local-model",
         default=None,
-        help="Ollama model for --local-chat. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b.",
+        help="Ollama model for --local-chat or --local-context-chat. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b.",
     )
     return parser
 
@@ -350,9 +363,9 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.mcp_config_tools
         or args.mcp_init_apple
     )
-    local_mode_enabled = args.local_chat
-    if args.local_model and not args.local_chat:
-        parser.error("--local-model можно использовать только вместе с --local-chat.")
+    local_mode_enabled = args.local_chat or args.local_context_chat
+    if args.local_model and not local_mode_enabled:
+        parser.error("--local-model можно использовать только вместе с --local-chat или --local-context-chat.")
 
     rag_mode_enabled = args.rag_chat or args.rag_chat_check
     if rag_mode_enabled:
@@ -366,6 +379,8 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Контекстный чат нельзя совмещать с MCP-режимами.")
 
     if local_mode_enabled:
+        if args.local_chat and args.local_context_chat:
+            parser.error("--local-chat и --local-context-chat нельзя использовать одновременно.")
         if args.prompt:
             parser.error("Локальный чат нельзя совмещать с prompt.")
         if args.file is not None or args.line_range or args.force_file:
@@ -565,7 +580,8 @@ def print_mcp_help() -> None:
                     ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
                     ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
                     ("/mcp rag-answer QUESTION", "ответить с verified sources/quotes или сказать Не знаю"),
-                    ("/mcp rag-compare QUESTION", "сравнить Without RAG, Baseline RAG и Enhanced RAG"),
+                    ("/mcp rag-answer-local QUESTION", "ответить через локальную модель Ollama с источниками и цитатами"),
+                    ("/mcp rag-compare QUESTION", "сравнить локальную и облачную генерацию на найденном контексте"),
                     ("/mcp rag-eval", "проверить sources, quotes и answer/quote alignment на 10 вопросах"),
                     ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
                 ),
@@ -1305,6 +1321,17 @@ def handle_pipeline_short_command(config_path: Path, command: str, argument: str
         call_pipeline_tool_from_short_command(config_path, "rag_answer", {"question": question, "use_rag": True})
         return True
 
+    if command == "rag-answer-local":
+        question = parse_required_text_argument("rag-answer-local", argument)
+        if question is None:
+            return True
+        call_pipeline_tool_from_short_command(
+            config_path,
+            "rag_answer",
+            {"question": question, "use_rag": True, "generation_provider": "local"},
+        )
+        return True
+
     if command == "rag-compare":
         question = parse_required_text_argument("rag-compare", argument)
         if question is None:
@@ -1676,7 +1703,11 @@ def print_rag_answer_result(payload: dict[str, Any]) -> None:
     print(status_line("Grounding", str(payload.get("grounding_status", "")), SUCCESS))
     print(status_line("Best similarity", str(payload.get("best_similarity", "")), VALUE))
     print(status_line("Question", str(payload.get("question", "")), VALUE))
+    if payload.get("generation_provider"):
+        print(status_line("Generation", str(payload.get("generation_provider", "")), VALUE))
     print(status_line("Model", str(payload.get("model", "")), VALUE))
+    if payload.get("elapsed_ms") is not None:
+        print(status_line("Elapsed", f"{payload.get('elapsed_ms')} ms", VALUE))
     print_multiline_value("Answer", str(payload.get("answer", "")))
     print_rag_sources(payload.get("sources"))
     print_rag_quotes(payload.get("quotes"))
@@ -1688,16 +1719,33 @@ def print_rag_compare_result(payload: dict[str, Any]) -> None:
     without_rag = payload.get("without_rag") if isinstance(payload.get("without_rag"), dict) else {}
     baseline_rag = payload.get("baseline_rag") if isinstance(payload.get("baseline_rag"), dict) else {}
     with_rag = payload.get("with_rag") if isinstance(payload.get("with_rag"), dict) else {}
+    local_without_rag = payload.get("local_without_rag") if isinstance(payload.get("local_without_rag"), dict) else {}
+    local_baseline_rag = payload.get("local_baseline_rag") if isinstance(payload.get("local_baseline_rag"), dict) else {}
+    local_with_rag = payload.get("local_with_rag") if isinstance(payload.get("local_with_rag"), dict) else {}
+    cloud_without_rag = payload.get("cloud_without_rag") if isinstance(payload.get("cloud_without_rag"), dict) else {}
+    cloud_baseline_rag = payload.get("cloud_baseline_rag") if isinstance(payload.get("cloud_baseline_rag"), dict) else {}
+    cloud_with_rag = payload.get("cloud_with_rag") if isinstance(payload.get("cloud_with_rag"), dict) else {}
     print()
-    print_multiline_value("Without RAG", str(without_rag.get("answer", "")))
+    print_multiline_value("Local model", format_rag_compare_answer(local_without_rag or without_rag))
     print()
-    print_multiline_value("Baseline RAG", str(baseline_rag.get("answer", "")))
-    print_rag_sources(baseline_rag.get("sources"))
-    print_rag_quotes(baseline_rag.get("quotes"))
+    print_multiline_value("Local baseline RAG", format_rag_compare_answer(local_baseline_rag or baseline_rag))
+    print_rag_sources((local_baseline_rag or baseline_rag).get("sources"))
+    print_rag_quotes((local_baseline_rag or baseline_rag).get("quotes"))
     print()
-    print_multiline_value("Enhanced RAG", str(with_rag.get("answer", "")))
-    print_rag_sources(with_rag.get("sources"))
-    print_rag_quotes(with_rag.get("quotes"))
+    print_multiline_value("Local enhanced RAG", format_rag_compare_answer(local_with_rag or with_rag))
+    print_rag_sources((local_with_rag or with_rag).get("sources"))
+    print_rag_quotes((local_with_rag or with_rag).get("quotes"))
+    if cloud_without_rag or cloud_baseline_rag or cloud_with_rag:
+        print()
+        print_multiline_value("Cloud model", format_rag_compare_answer(cloud_without_rag))
+        print()
+        print_multiline_value("Cloud baseline RAG", format_rag_compare_answer(cloud_baseline_rag))
+        print()
+        print_multiline_value("Cloud enhanced RAG", format_rag_compare_answer(cloud_with_rag))
+    cloud_error = str(payload.get("cloud_error", ""))
+    if cloud_error:
+        print()
+        print(status_line("Cloud comparison", cloud_error, WARNING))
     retrieval_modes = payload.get("retrieval_modes")
     if isinstance(retrieval_modes, dict):
         print()
@@ -1722,6 +1770,23 @@ def print_rag_compare_result(payload: dict[str, Any]) -> None:
     if note:
         print()
         print_multiline_value("Quality note", note)
+
+
+def format_rag_compare_answer(payload: dict[str, Any]) -> str:
+    if not payload:
+        return "нет данных"
+    meta = []
+    provider = str(payload.get("generation_provider", "")).strip()
+    model = str(payload.get("model", "")).strip()
+    elapsed_ms = payload.get("elapsed_ms")
+    if provider:
+        meta.append(f"generation={provider}")
+    if model:
+        meta.append(f"model={model}")
+    if elapsed_ms is not None:
+        meta.append(f"elapsed={elapsed_ms} ms")
+    answer = str(payload.get("answer", "")).strip()
+    return ("\n".join(["; ".join(meta), answer]) if meta else answer).strip()
 
 
 def print_rag_eval_questions(payload: dict[str, Any]) -> None:
@@ -2424,14 +2489,33 @@ def run_interactive_session(agent: CodeAgent) -> None:
         send(agent, text)
 
 
-def run_rag_chat_session(agent: CodeAgent) -> None:
-    chat = RAGChatService(agent=agent, rag_service=RAGService())
+def run_rag_chat_session(
+    agent: CodeAgent,
+    *,
+    local_generation: bool = False,
+    local_model: str | None = None,
+) -> None:
+    local_llm = (
+        LocalLLMChatService(model=local_model)
+        if local_generation and local_model
+        else LocalLLMChatService()
+        if local_generation
+        else None
+    )
+    chat = RAGChatService(agent=agent, rag_service=RAGService(), local_llm=local_llm)
     last_result = None
-    print(colorize("Code Agent CLI · Контекстный чат", BOLD + ACCENT))
-    print_startup_summary(agent)
+    title = "Code Agent CLI · Локальный контекстный чат" if local_llm else "Code Agent CLI · Контекстный чат"
+    print(colorize(title, BOLD + ACCENT))
+    if local_llm is not None:
+        print_local_context_startup_summary(agent, local_llm)
+    else:
+        print_startup_summary(agent)
     print()
     print(indented_line("Каждый вопрос ищет фрагменты в локальной базе документов."))
-    print(indented_line("Ollama строит embedding вопроса, затем ответ собирается с источниками."))
+    if local_llm is not None:
+        print(indented_line(f"Ollama строит embedding вопроса и генерирует ответ локальной моделью {local_llm.model}."))
+    else:
+        print(indented_line("Ollama строит embedding вопроса, затем ответ собирается с источниками."))
     print(indented_line("Команды: /state, /sources, /reset-context, /help, /exit"))
 
     while True:
@@ -2481,6 +2565,15 @@ def run_rag_chat_session(agent: CodeAgent) -> None:
             continue
 
         last_result = send_rag_chat(chat, text)
+
+
+def print_local_context_startup_summary(agent: CodeAgent, local_llm: LocalLLMChatService) -> None:
+    status = agent.status()
+    print(status_line("Локальная модель", local_llm.model, VALUE))
+    print(status_line("Ollama", local_llm.ollama_url, VALUE))
+    print(status_line("Режим", "локальная база документов + локальная генерация", VALUE))
+    print(status_line("История", f"{status['history_messages']}/{status['max_history_messages']} · загружена"))
+    print("Введите /help для списка команд.")
 
 
 def run_local_chat_session(model: str | None = None) -> None:
@@ -2629,6 +2722,12 @@ def print_rag_chat_banner(result: Any) -> None:
     title = "Контекст найден" if grounded else "Слабый контекст"
     print(colorize(f"== {title} ==", BOLD + label_color))
     print(status_line("similarity", f"{result.best_similarity:.4f}", VALUE))
+    provider = getattr(result, "generation_provider", "")
+    model = getattr(result, "model", "")
+    if provider:
+        print(status_line("generation", provider, VALUE))
+    if model:
+        print(status_line("model", model, VALUE))
     print(status_line("sources", str(len(result.sources)), SUCCESS if result.sources else WARNING))
     print(status_line("quotes", str(len(result.quotes)), SUCCESS if result.quotes else WARNING))
 
@@ -3273,7 +3372,8 @@ def print_help() -> None:
                     ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
                     ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
                     ("/mcp rag-answer QUESTION", "ответить с verified sources/quotes или сказать Не знаю"),
-                    ("/mcp rag-compare QUESTION", "сравнить Without RAG, Baseline RAG и Enhanced RAG"),
+                    ("/mcp rag-answer-local QUESTION", "ответить через локальную модель Ollama с источниками и цитатами"),
+                    ("/mcp rag-compare QUESTION", "сравнить локальную и облачную генерацию на найденном контексте"),
                     ("/mcp rag-eval", "проверить sources, quotes и answer/quote alignment на 10 вопросах"),
                     ("/mcp orchestrate TEXT", "построить и выполнить multi-server MCP flow"),
                 ),
@@ -3295,7 +3395,9 @@ def print_ollama_help() -> None:
                     (f"ollama pull {DEFAULT_LOCAL_MODEL}", "скачать модель локального чата"),
                     ("ollama list", "проверить установленные локальные модели"),
                     ("agent --local-chat", f"запустить чат с {DEFAULT_LOCAL_MODEL}"),
+                    ("agent --local-context-chat", "запустить локальный чат с поиском по базе документов"),
                     ("agent --local-chat --local-model MODEL", "запустить чат с другой Ollama-моделью"),
+                    ("agent --local-context-chat --local-model MODEL", "выбрать модель для локального контекстного чата"),
                     ("CODE_AGENT_LOCAL_MODEL=MODEL agent --local-chat", "выбрать модель через переменную окружения"),
                     ("CODE_AGENT_OLLAMA_URL=URL agent --local-chat", "выбрать другой адрес Ollama API"),
                 ),
@@ -4054,7 +4156,7 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
         init_orchestration_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-status | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-status | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-answer-local QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

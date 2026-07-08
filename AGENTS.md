@@ -137,11 +137,15 @@ RAG answers must stay grounded:
 - build quotes deterministically from retrieved chunks, not from model output;
 - if no retrieved chunk is strong enough for `min_similarity`, answer `Не знаю`
   and ask the user to clarify or reindex relevant documents.
+- support local answer generation through Ollama for fully local RAG flows;
+  this path must not require `DEEPSEEK_API_KEY`.
 
 Keep these comparison modes clear:
 - `Without RAG`: direct LLM answer without local context;
 - `Baseline RAG`: vector search only, without rewrite/filter/rerank;
 - `Enhanced RAG`: query rewrite plus similarity filter and heuristic rerank.
+- local vs cloud generation: compare answer quality, elapsed time and errors on
+  the same local retrieval payload when cloud credentials are available.
 
 Use `/mcp rag-compare QUESTION` to compare answer modes and `/mcp rag-eval` to
 compare baseline vs enhanced retrieval quality on the control questions,
