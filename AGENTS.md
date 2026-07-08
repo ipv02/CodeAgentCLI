@@ -11,6 +11,8 @@ It includes:
 - MCP stdio server configuration and tool listing;
 - Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
 - local Ollama chat mode for running a local LLM through `agent --local-chat`;
+- fully local context chat through `agent --local-context-chat`, with local
+  retrieval and local Ollama answer generation;
 - token counting and context-limit checks;
 - internal subagent prompts for response, memory and task state.
 
@@ -65,6 +67,12 @@ Run local Ollama chat:
 ollama serve
 ollama pull llama3.2:3b
 agent --local-chat
+```
+
+Run fully local context chat over the document index:
+
+```bash
+agent --local-context-chat
 ```
 
 ## Development Guidelines
@@ -139,6 +147,12 @@ RAG answers must stay grounded:
   and ask the user to clarify or reindex relevant documents.
 - support local answer generation through Ollama for fully local RAG flows;
   this path must not require `DEEPSEEK_API_KEY`.
+- keep default cloud/context RAG retrieval backward-compatible; local-only RAG
+  improvements should stay isolated to the local generation path unless the task
+  explicitly asks to change default retrieval.
+- local RAG may use local-only hybrid retrieval and compact Evidence packaging
+  before calling Ollama, but must still ground sources and quotes in retrieved
+  chunks from the SQLite index.
 
 Keep these comparison modes clear:
 - `Without RAG`: direct LLM answer without local context;
@@ -150,6 +164,10 @@ Keep these comparison modes clear:
 Use `/mcp rag-compare QUESTION` to compare answer modes and `/mcp rag-eval` to
 compare baseline vs enhanced retrieval quality on the control questions,
 including source presence, quote presence and answer/quote alignment.
+
+`/mcp rag-answer-local QUESTION` should generate a grounded answer through the
+local Ollama model. `agent --local-context-chat` is the interactive version of
+that local flow.
 
 ## Context Chat Guidelines
 
@@ -205,6 +223,24 @@ The local chat commands must remain available and readable:
 - `/help`: show local chat help;
 - `/exit`: exit the local chat.
 
+## Local Context Chat Guidelines
+
+`agent --local-context-chat` is the fully local mini-chat over the local document
+index. It must:
+- embed the current question with local Ollama embeddings;
+- search the local SQLite document index before answering;
+- package retrieved chunks into compact Evidence for the local model;
+- answer through the selected local Ollama model;
+- not require `DEEPSEEK_API_KEY`;
+- always show readable sources and quotes.
+
+The local context chat commands must remain available and readable:
+- `/state`: formatted task state, working memory and recent history;
+- `/sources`: formatted sources and quotes for the last answer;
+- `/reset-context`: clear current dialogue/task memory while preserving profile;
+- `/help`: show local context chat help;
+- `/exit`: exit the local context chat.
+
 ## Verification
 
 Before finishing code changes, run the most relevant available check.
@@ -214,6 +250,7 @@ At minimum, for CLI-level changes, verify one of:
 ```bash
 agent --help
 agent --local-chat
+agent --local-context-chat
 agent --context-chat-check
 agent --mcp-config-tools
 agent "test prompt"

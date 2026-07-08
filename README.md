@@ -435,8 +435,16 @@ Verified Quotes: короткие фрагменты из найденных chu
 Полностью локальный RAG-флоу:
 
 ```text
-question -> query rewrite -> Ollama embedding -> SQLite chunks -> similarity filter + heuristic rerank -> Ollama answer -> verified sources/quotes
+question -> query rewrite -> Ollama embedding -> local SQLite retrieval -> compact Evidence -> Ollama answer -> verified sources/quotes
 ```
+
+Обычные команды `/mcp rag-search`, `/mcp rag-answer`, `agent --context-chat` и
+`agent --context-chat-check` сохраняют стандартный enhanced retrieval для
+облачной генерации. Локальная генерация использует отдельный local-only путь:
+он добавляет hybrid retrieval поверх SQLite index и передает в Ollama компактный
+блок `Evidence`, чтобы локальная модель видела не большой шумный chunk, а
+короткие релевантные фрагменты с `source`, `section`, `chunk_id`, цитатами и
+точными строками вроде путей, команд и имен моделей.
 
 Запуск интерактивного режима:
 
@@ -450,6 +458,33 @@ MCP shortcut для одного локального ответа:
 ```text
 /mcp rag-answer-local "Где хранится SQLite-индекс документов?"
 ```
+
+Команды внутри локального контекстного чата:
+
+```text
+/state          показать состояние задачи и память текущего диалога
+/sources        показать источники и цитаты последнего ответа
+/reset-context  очистить историю текущего диалога и task memory
+/help
+/exit
+```
+
+Минимальная проверка полностью локального RAG:
+
+```text
+agent --local-context-chat
+Где хранится SQLite-индекс документов?
+Какая модель используется для embeddings?
+Что делает enhanced retrieval в локальном поиске?
+/sources
+/exit
+```
+
+Ожидаемо: режим показывает `generation: local`, модель `llama3.2:3b` или
+выбранную через `--local-model`, источники и цитаты. Для этих вопросов ответ
+должен извлекаться из локального индекса, включая `document_index.db`,
+`nomic-embed-text` и шаги `query rewrite`, `similarity filter`,
+`heuristic rerank`.
 
 Команда `/mcp rag-compare` показывает локальную генерацию и, если задан
 `DEEPSEEK_API_KEY`, облачную генерацию на найденном контексте:
