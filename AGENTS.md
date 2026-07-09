@@ -13,6 +13,8 @@ It includes:
 - local Ollama chat mode for running a local LLM through `agent --local-chat`;
 - fully local context chat through `agent --local-context-chat`, with local
   retrieval and local Ollama answer generation;
+- reproducible local generation optimization checks through
+  `agent --local-rag-optimize`;
 - token counting and context-limit checks;
 - internal subagent prompts for response, memory and task state.
 
@@ -73,6 +75,12 @@ Run fully local context chat over the document index:
 
 ```bash
 agent --local-context-chat
+```
+
+Compare baseline and optimized local generation on the same retrieved evidence:
+
+```bash
+agent --local-rag-optimize
 ```
 
 ## Development Guidelines
@@ -233,6 +241,8 @@ index. It must:
 - answer through the selected local Ollama model;
 - not require `DEEPSEEK_API_KEY`;
 - always show readable sources and quotes.
+- use the optimized local generation profile by default, with explicit
+  `temperature`, `num_predict` and `num_ctx` Ollama options.
 
 The local context chat commands must remain available and readable:
 - `/state`: formatted task state, working memory and recent history;
@@ -240,6 +250,29 @@ The local context chat commands must remain available and readable:
 - `/reset-context`: clear current dialogue/task memory while preserving profile;
 - `/help`: show local context chat help;
 - `/exit`: exit the local context chat.
+
+## Local LLM Optimization Guidelines
+
+`agent --local-rag-optimize` is the reproducible before/after check for local
+generation over project documentation. It must:
+- run baseline and optimized generation on the same retrieved chunks;
+- keep retrieval, the SQLite index, sources and quotes unchanged between
+  profiles;
+- report expected-term quality, elapsed time, Ollama tokens per second and
+  repeat stability;
+- report model parameter size, quantization and loaded model memory when Ollama
+  exposes them;
+- work without `DEEPSEEK_API_KEY`.
+
+Keep the profiles explicit:
+- `baseline`: the previous local RAG prompt, `temperature=0.2`, and Ollama
+  defaults for output length and context window;
+- `optimized`: strict Evidence boundaries, `temperature=0.0`,
+  `num_predict=500`, and `num_ctx=4096`.
+
+Allow overriding optimized values with `CODE_AGENT_LOCAL_RAG_TEMPERATURE`,
+`CODE_AGENT_LOCAL_RAG_NUM_PREDICT` and `CODE_AGENT_LOCAL_RAG_NUM_CTX`. Do not
+add deterministic answers for individual evaluation questions.
 
 ## Verification
 
@@ -251,6 +284,7 @@ At minimum, for CLI-level changes, verify one of:
 agent --help
 agent --local-chat
 agent --local-context-chat
+agent --local-rag-optimize
 agent --context-chat-check
 agent --mcp-config-tools
 agent "test prompt"

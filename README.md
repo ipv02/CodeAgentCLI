@@ -247,6 +247,18 @@ CODE_AGENT_LOCAL_MODEL=qwen2.5-coder:3b agent --local-chat
 локальной моделью. Для ответов с поиском по локальной базе документов и
 локальной генерацией используйте `agent --local-context-chat`.
 
+Параметры обычного локального чата передаются в Ollama явно:
+
+```bash
+CODE_AGENT_LOCAL_TEMPERATURE=0.2 \
+CODE_AGENT_LOCAL_NUM_PREDICT=512 \
+CODE_AGENT_LOCAL_NUM_CTX=4096 \
+agent --local-chat
+```
+
+`num_predict` ограничивает число токенов ответа, а `num_ctx` задает контекстное
+окно запроса.
+
 Пример ручной проверки внутри `agent --local-chat`:
 
 ```text
@@ -485,6 +497,60 @@ agent --local-context-chat
 должен извлекаться из локального индекса, включая `document_index.db`,
 `nomic-embed-text` и шаги `query rewrite`, `similarity filter`,
 `heuristic rerank`.
+
+### Оптимизация локальной модели для ответов по документам
+
+`agent --local-rag-optimize` сравнивает два профиля генерации на контрольных
+вопросах из проекта:
+
+- `baseline`: прежний prompt, `temperature=0.2`, стандартные Ollama
+  `num_predict` и `num_ctx`;
+- `optimized`: строгий Evidence prompt, `temperature=0.0`,
+  `num_predict=500`, `num_ctx=4096`.
+
+Для каждого вопроса retrieval выполняется один раз. Оба профиля получают
+одинаковые chunks, поэтому отчет сравнивает именно генерацию, а не разные
+результаты поиска.
+
+Быстрый наглядный прогон:
+
+```bash
+agent --local-rag-optimize --optimization-questions 1 --optimization-repeats 2
+```
+
+Полный прогон:
+
+```bash
+agent --local-rag-optimize --optimization-questions 10 --optimization-repeats 3
+```
+
+Отчет показывает:
+
+- ответы до и после оптимизации;
+- совпадения ожидаемых фактов и итоговую оценку качества;
+- источники из локального SQLite-индекса;
+- время retrieval и генерации;
+- токены ответа и токены в секунду из Ollama API;
+- стабильность ответа и качества на повторных запусках;
+- размер, фактическое квантование и память загруженной модели, если Ollama
+  возвращает эти данные через `/api/show` и `/api/ps`.
+
+Настройки optimized-профиля:
+
+```bash
+CODE_AGENT_LOCAL_RAG_TEMPERATURE=0.0 \
+CODE_AGENT_LOCAL_RAG_NUM_PREDICT=500 \
+CODE_AGENT_LOCAL_RAG_NUM_CTX=4096 \
+agent --local-rag-optimize
+```
+
+Эти же настройки использует `agent --local-context-chat`. Стандартный
+retrieval, SQLite-индекс, verified sources и verified quotes не меняются.
+Проверить другую уже установленную модель можно так:
+
+```bash
+agent --local-rag-optimize --local-model qwen2.5-coder:3b
+```
 
 Команда `/mcp rag-compare` показывает локальную генерацию и, если задан
 `DEEPSEEK_API_KEY`, облачную генерацию на найденном контексте:

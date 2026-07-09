@@ -34,6 +34,7 @@ from code_agent_cli.local_llm import (
     LocalLLMChatService,
     LocalLLMError,
 )
+from code_agent_cli.local_rag_optimization import run_local_rag_optimization
 from code_agent_cli.mcp_config import (
     MCPConfig,
     MCPConfigError,
@@ -211,6 +212,15 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.local_rag_optimize:
+        if not run_local_rag_optimization_check(
+            local_model=args.local_model,
+            max_questions=args.optimization_questions,
+            repeats=args.optimization_repeats,
+        ):
+            raise SystemExit(1)
+        return
+
     if args.local_context_chat:
         run_rag_chat_session(
             CodeAgent(auto_memory_updates=False, auto_task_state_updates=False),
@@ -338,9 +348,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start a fully local context chat: local document retrieval plus local Ollama answer generation.",
     )
     parser.add_argument(
+        "--local-rag-optimize",
+        action="store_true",
+        help="Compare baseline and optimized local Ollama generation on the same retrieved document evidence.",
+    )
+    parser.add_argument(
+        "--optimization-questions",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Questions to run with --local-rag-optimize (1-10, default: 3).",
+    )
+    parser.add_argument(
+        "--optimization-repeats",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Optimized runs per question for stability checks (1-5, default: 2).",
+    )
+    parser.add_argument(
         "--local-model",
         default=None,
-        help="Ollama model for --local-chat or --local-context-chat. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b.",
+        help=(
+            "Ollama model for --local-chat, --local-context-chat or "
+            "--local-rag-optimize. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b."
+        ),
     )
     return parser
 
@@ -363,9 +395,12 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.mcp_config_tools
         or args.mcp_init_apple
     )
-    local_mode_enabled = args.local_chat or args.local_context_chat
+    local_mode_enabled = args.local_chat or args.local_context_chat or args.local_rag_optimize
     if args.local_model and not local_mode_enabled:
-        parser.error("--local-model можно использовать только вместе с --local-chat или --local-context-chat.")
+        parser.error(
+            "--local-model можно использовать только вместе с --local-chat, "
+            "--local-context-chat или --local-rag-optimize."
+        )
 
     rag_mode_enabled = args.rag_chat or args.rag_chat_check
     if rag_mode_enabled:
@@ -379,8 +414,9 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Контекстный чат нельзя совмещать с MCP-режимами.")
 
     if local_mode_enabled:
-        if args.local_chat and args.local_context_chat:
-            parser.error("--local-chat и --local-context-chat нельзя использовать одновременно.")
+        local_modes = [args.local_chat, args.local_context_chat, args.local_rag_optimize]
+        if sum(1 for enabled in local_modes if enabled) > 1:
+            parser.error("Локальные режимы нельзя использовать одновременно.")
         if args.prompt:
             parser.error("Локальный чат нельзя совмещать с prompt.")
         if args.file is not None or args.line_range or args.force_file:
@@ -389,6 +425,16 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Локальный чат нельзя совмещать с MCP-режимами.")
         if rag_mode_enabled:
             parser.error("Локальный чат нельзя совмещать с контекстным чатом.")
+    elif args.optimization_questions != 3 or args.optimization_repeats != 2:
+        parser.error(
+            "--optimization-questions и --optimization-repeats используются только "
+            "вместе с --local-rag-optimize."
+        )
+
+    if not 1 <= args.optimization_questions <= 10:
+        parser.error("--optimization-questions должен быть в диапазоне 1-10.")
+    if not 1 <= args.optimization_repeats <= 5:
+        parser.error("--optimization-repeats должен быть в диапазоне 1-5.")
 
     if not mcp_mode_enabled:
         return
@@ -2572,6 +2618,18 @@ def print_local_context_startup_summary(agent: CodeAgent, local_llm: LocalLLMCha
     print(status_line("Локальная модель", local_llm.model, VALUE))
     print(status_line("Ollama", local_llm.ollama_url, VALUE))
     print(status_line("Режим", "локальная база документов + локальная генерация", VALUE))
+    print(status_line("Профиль", "optimized", SUCCESS))
+    print(
+        status_line(
+            "Параметры",
+            (
+                f"temperature={os.getenv('CODE_AGENT_LOCAL_RAG_TEMPERATURE', '0.0')}, "
+                f"num_predict={os.getenv('CODE_AGENT_LOCAL_RAG_NUM_PREDICT', '500')}, "
+                f"num_ctx={os.getenv('CODE_AGENT_LOCAL_RAG_NUM_CTX', '4096')}"
+            ),
+            VALUE,
+        )
+    )
     print(status_line("История", f"{status['history_messages']}/{status['max_history_messages']} · загружена"))
     print("Введите /help для списка команд.")
 
@@ -2582,6 +2640,8 @@ def run_local_chat_session(model: str | None = None) -> None:
     print(status_line("Модель", chat.model, VALUE))
     print(status_line("Ollama", chat.ollama_url, VALUE))
     print(status_line("Temperature", str(chat.temperature), VALUE))
+    print(status_line("Max tokens", str(chat.num_predict), VALUE))
+    print(status_line("Context window", str(chat.num_ctx), VALUE))
     print(indented_line("Команды: /model, /reset, /help, /exit"))
     print(indented_line("Подсказка: если модель не скачана, выполните: ollama pull " + chat.model))
 
@@ -2624,6 +2684,162 @@ def run_local_chat_session(model: str | None = None) -> None:
             continue
 
         send_local_chat(chat, text)
+
+
+def run_local_rag_optimization_check(
+    *,
+    local_model: str | None,
+    max_questions: int,
+    repeats: int,
+) -> bool:
+    print(colorize("Code Agent CLI · Оптимизация локальной модели", BOLD + ACCENT))
+    print(indented_line("Сравниваю baseline и optimized на одинаковом локальном Evidence."))
+    print(indented_line("Retrieval выполняется один раз для каждой пары ответов."))
+    print()
+    try:
+        with loader("Запускаю локальное сравнение"):
+            payload = run_local_rag_optimization(
+                local_model=local_model,
+                max_questions=max_questions,
+                repeats=repeats,
+            )
+    except (LocalLLMError, RAGError, ValueError) as error:
+        print(f"Ошибка локальной оптимизации: {error}", file=sys.stderr)
+        return False
+    except Exception as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        return False
+
+    print_local_rag_optimization_result(payload)
+    return True
+
+
+def print_local_rag_optimization_result(payload: dict[str, Any]) -> None:
+    model_info = payload.get("model_info") if isinstance(payload.get("model_info"), dict) else {}
+    runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+
+    print(header_line("Модель и квантование"))
+    print(status_line("Модель", str(payload.get("model", "")), VALUE))
+    print(status_line("Параметры", str(model_info.get("parameter_size") or "нет данных"), VALUE))
+    print(status_line("Квантование", str(model_info.get("quantization_level") or "нет данных"), VALUE))
+    if model_info.get("context_length"):
+        print(status_line("Контекст модели", str(model_info["context_length"]), VALUE))
+    if runtime.get("size"):
+        print(status_line("Размер модели", format_byte_size(int(runtime["size"])), VALUE))
+    if runtime.get("size_vram"):
+        print(status_line("Память Ollama", format_byte_size(int(runtime["size_vram"])), VALUE))
+
+    print()
+    print(header_line("Профили генерации"))
+    for name in ("baseline", "optimized"):
+        profile = profiles.get(name) if isinstance(profiles.get(name), dict) else {}
+        num_predict = profile.get("num_predict")
+        num_ctx = profile.get("num_ctx")
+        print(
+            status_line(
+                name,
+                (
+                    f"temperature={profile.get('temperature')}, "
+                    f"num_predict={num_predict if num_predict is not None else 'Ollama default'}, "
+                    f"num_ctx={num_ctx if num_ctx is not None else 'Ollama default'}"
+                ),
+                SUCCESS if name == "optimized" else VALUE,
+            )
+        )
+
+    for index, item in enumerate(ensure_list(payload.get("results")), start=1):
+        if not isinstance(item, dict):
+            continue
+        baseline = item.get("baseline") if isinstance(item.get("baseline"), dict) else {}
+        optimized = item.get("optimized") if isinstance(item.get("optimized"), dict) else {}
+        print()
+        print(colorize(f"Вопрос {index}: {item.get('question', '')}", BOLD + ACCENT))
+        print(status_line("Контекст", str(item.get("grounding_status", "")), SUCCESS))
+        print(status_line("Similarity", str(item.get("best_similarity", "")), VALUE))
+        print(status_line("Retrieval", f"{item.get('retrieval_ms', 0)} ms · общий для двух профилей", VALUE))
+        print_multiline_value("Ожидание", str(item.get("expected", "")))
+        print()
+        print_multiline_value("До · baseline", str(baseline.get("content", "")))
+        print_local_optimization_metrics(baseline)
+        print()
+        print_multiline_value("После · optimized", str(optimized.get("content", "")))
+        print_local_optimization_metrics(optimized)
+        print(
+            status_line(
+                "Стабильность ответа",
+                "одинаковый" if optimized.get("repeat_answers_equal") else "формулировки различаются",
+                SUCCESS if optimized.get("repeat_answers_equal") else WARNING,
+            )
+        )
+        print(
+            status_line(
+                "Стабильность качества",
+                "одинаковая" if optimized.get("repeat_quality_equal") else "различается",
+                SUCCESS if optimized.get("repeat_quality_equal") else WARNING,
+            )
+        )
+        sources = ensure_list(item.get("sources"))
+        source_names = [
+            str(source.get("source", ""))
+            for source in sources
+            if isinstance(source, dict) and source.get("source")
+        ]
+        print(status_line("Источники", ", ".join(dict.fromkeys(source_names)) or "нет", VALUE))
+
+    print()
+    print(header_line("Итог до/после"))
+    print(status_line("Качество baseline", str(summary.get("baseline_quality", 0)), VALUE))
+    print(status_line("Качество optimized", str(summary.get("optimized_quality", 0)), SUCCESS))
+    print(status_line("Среднее время baseline", f"{summary.get('baseline_avg_ms', 0)} ms", VALUE))
+    print(status_line("Среднее время optimized", f"{summary.get('optimized_avg_ms', 0)} ms", VALUE))
+    if summary.get("optimized_tokens_per_second"):
+        print(
+            status_line(
+                "Скорость optimized",
+                f"{summary['optimized_tokens_per_second']} токенов/с",
+                SUCCESS,
+            )
+        )
+    print(
+        status_line(
+            "Стабильные ответы",
+            f"{summary.get('stable_answers', 0)}/{payload.get('questions', 0)}",
+            VALUE,
+        )
+    )
+    print(
+        status_line(
+            "Стабильное качество",
+            f"{summary.get('stable_quality', 0)}/{payload.get('questions', 0)}",
+            SUCCESS,
+        )
+    )
+
+
+def print_local_optimization_metrics(result: dict[str, Any]) -> None:
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    hits = result.get("term_hits") if isinstance(result.get("term_hits"), dict) else {}
+    rendered_hits = ", ".join(
+        f"{term}={'ok' if matched else 'miss'}" for term, matched in hits.items()
+    )
+    print(status_line("Качество", str(result.get("quality_score", 0)), VALUE))
+    print(status_line("Ожидаемые факты", rendered_hits or "нет", VALUE))
+    print(status_line("Генерация", f"{result.get('elapsed_ms', 0)} ms", VALUE))
+    if usage.get("eval_count") is not None:
+        print(status_line("Токены ответа", str(usage["eval_count"]), VALUE))
+    if usage.get("tokens_per_second") is not None:
+        print(status_line("Скорость", f"{usage['tokens_per_second']} токенов/с", VALUE))
+
+
+def format_byte_size(value: int) -> str:
+    size = float(max(value, 0))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def send_local_chat(chat: LocalLLMChatService, text: str) -> None:
@@ -2673,6 +2889,9 @@ def print_local_chat_status(chat: LocalLLMChatService) -> None:
     print(status_line("Ollama", chat.ollama_url, VALUE))
     print(status_line("История", f"{max(len(chat.messages) - 1, 0)} сообщений"))
     print(status_line("Timeout", f"{chat.timeout:.0f} сек"))
+    print(status_line("Temperature", str(chat.temperature), VALUE))
+    print(status_line("Max tokens", str(chat.num_predict), VALUE))
+    print(status_line("Context window", str(chat.num_ctx), VALUE))
 
 
 def send_rag_chat(chat: RAGChatService, text: str) -> Any | None:
@@ -3396,10 +3615,26 @@ def print_ollama_help() -> None:
                     ("ollama list", "проверить установленные локальные модели"),
                     ("agent --local-chat", f"запустить чат с {DEFAULT_LOCAL_MODEL}"),
                     ("agent --local-context-chat", "запустить локальный чат с поиском по базе документов"),
+                    (
+                        "agent --local-rag-optimize",
+                        "сравнить baseline и optimized локальную генерацию на одинаковом Evidence",
+                    ),
                     ("agent --local-chat --local-model MODEL", "запустить чат с другой Ollama-моделью"),
                     ("agent --local-context-chat --local-model MODEL", "выбрать модель для локального контекстного чата"),
                     ("CODE_AGENT_LOCAL_MODEL=MODEL agent --local-chat", "выбрать модель через переменную окружения"),
                     ("CODE_AGENT_OLLAMA_URL=URL agent --local-chat", "выбрать другой адрес Ollama API"),
+                    (
+                        "CODE_AGENT_LOCAL_RAG_TEMPERATURE=0.0",
+                        "temperature optimized-профиля локальных ответов по документам",
+                    ),
+                    (
+                        "CODE_AGENT_LOCAL_RAG_NUM_PREDICT=500",
+                        "максимум токенов optimized-ответа Ollama",
+                    ),
+                    (
+                        "CODE_AGENT_LOCAL_RAG_NUM_CTX=4096",
+                        "контекстное окно optimized-профиля Ollama",
+                    ),
                 ),
             ),
             (

@@ -29,6 +29,42 @@ DEFAULT_RAG_QUOTE_LIMIT = 5
 MAX_RAG_TOP_K = 20
 RAG_RETRIEVAL_MODES = {"baseline", "filtered", "enhanced"}
 RAG_GENERATION_PROVIDERS = {"cloud", "local"}
+LOCAL_RAG_GENERATION_PROFILES = {"baseline", "optimized"}
+
+
+@dataclass(frozen=True)
+class LocalRAGGenerationProfile:
+    name: str
+    temperature: float
+    num_predict: int | None
+    num_ctx: int | None
+
+    @property
+    def options(self) -> dict[str, Any]:
+        values: dict[str, Any] = {"temperature": self.temperature}
+        if self.num_predict is not None:
+            values["num_predict"] = self.num_predict
+        if self.num_ctx is not None:
+            values["num_ctx"] = self.num_ctx
+        return values
+
+
+def local_rag_generation_profile(name: str) -> LocalRAGGenerationProfile:
+    if name == "baseline":
+        return LocalRAGGenerationProfile(
+            name="baseline",
+            temperature=0.2,
+            num_predict=None,
+            num_ctx=None,
+        )
+    if name != "optimized":
+        raise RAGError("local_generation_profile должен быть baseline или optimized.")
+    return LocalRAGGenerationProfile(
+        name="optimized",
+        temperature=env_float("CODE_AGENT_LOCAL_RAG_TEMPERATURE", 0.0),
+        num_predict=max(env_int("CODE_AGENT_LOCAL_RAG_NUM_PREDICT", 500), 1),
+        num_ctx=max(env_int("CODE_AGENT_LOCAL_RAG_NUM_CTX", 4096), 512),
+    )
 
 
 @dataclass(frozen=True)
@@ -244,6 +280,7 @@ class RAGService:
         mode: str = "enhanced",
         generation_provider: str = "cloud",
         local_model: str | None = None,
+        local_generation_profile: str = "optimized",
     ) -> dict[str, Any]:
         clean_question = question.strip()
         if not clean_question:
@@ -289,6 +326,7 @@ class RAGService:
                     retrieved_chunks=retrieved_chunks,
                     use_rag=use_rag,
                     local_model=local_model,
+                    generation_profile=local_generation_profile,
                 )
             else:
                 llm_payload = generate_rag_llm_answer(
@@ -316,6 +354,8 @@ class RAGService:
             "raw_answer": llm_payload.get("raw_content", llm_payload["content"]),
             "model": llm_payload["model"],
             "generation_provider": generation_provider,
+            "generation_profile": llm_payload.get("generation_profile", ""),
+            "generation_options": llm_payload.get("generation_options", {}),
             "elapsed_ms": round((time.monotonic() - started_at) * 1000),
             "usage": llm_payload["usage"],
             "retrieval": retrieval_payload,
@@ -671,12 +711,60 @@ def generate_local_rag_llm_answer(
     retrieved_chunks: list[dict[str, Any]],
     use_rag: bool,
     local_model: str | None = None,
+    generation_profile: str = "optimized",
 ) -> dict[str, Any]:
     chat = LocalLLMChatService(model=local_model) if local_model else LocalLLMChatService()
-    max_tokens = int(os.getenv("CODE_AGENT_LOCAL_RAG_MAX_TOKENS", "1100"))
+    profile = local_rag_generation_profile(generation_profile)
     if use_rag:
         rewritten_question = rewrite_query(question)
         context = render_local_rag_context(question, retrieved_chunks)
+        aliases = (
+            f"Search aliases:\n{rewritten_question}\n\n"
+            if rewritten_question != question
+            else ""
+        )
+        system_prompt, user_prompt = build_local_rag_prompt(
+            question=question,
+            evidence=context,
+            aliases=aliases,
+            profile=profile.name,
+        )
+    else:
+        system_prompt = (
+            "Ты локальная модель внутри CodeAgentCLI. Отвечай на русском по общим знаниям "
+            "модели без доступа к локальной базе документов."
+        )
+        user_prompt = question
+
+    try:
+        response = chat.generate_payload(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            options=profile.options,
+            include_default_options=profile.name != "baseline",
+        )
+    except LocalLLMError as error:
+        raise RAGError(f"Локальная модель недоступна: {error}") from error
+
+    return {
+        "content": response["content"],
+        "model": response["model"],
+        "usage": response["usage"],
+        "generation_profile": profile.name,
+        "generation_options": response["options"],
+    }
+
+
+def build_local_rag_prompt(
+    *,
+    question: str,
+    evidence: str,
+    aliases: str,
+    profile: str,
+) -> tuple[str, str]:
+    if profile == "baseline":
         system_prompt = (
             "Ты локальная модель внутри CodeAgentCLI в режиме ответа по найденным документам. "
             "Отвечай на русском. Используй только блок Evidence ниже. "
@@ -687,15 +775,10 @@ def generate_local_rag_llm_answer(
             "Учитывай Search aliases как синонимы вопроса, но факты бери только из Evidence. "
             "Если Evidence не содержит ответа, скажи \"Не знаю\". Источники и цитаты добавит система."
         )
-        aliases = (
-            f"Search aliases:\n{rewritten_question}\n\n"
-            if rewritten_question != question
-            else ""
-        )
         user_prompt = (
             "Ответь по Evidence. Не используй общие знания модели.\n\n"
             f"{aliases}"
-            f"Evidence:\n{context}\n\n"
+            f"Evidence:\n{evidence}\n\n"
             f"Вопрос:\n{question}\n\n"
             "Формат ответа:\n"
             "- если ответ является путем, командой, моделью или настройкой: `Ответ: ...`;\n"
@@ -703,30 +786,35 @@ def generate_local_rag_llm_answer(
             "- не повторяй и не переводь название из вопроса.\n\n"
             "Краткий ответ:"
         )
-    else:
-        system_prompt = (
-            "Ты локальная модель внутри CodeAgentCLI. Отвечай на русском по общим знаниям "
-            "модели без доступа к локальной базе документов."
-        )
-        user_prompt = question
+        return system_prompt, user_prompt
 
-    try:
-        content = chat.generate(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-    except LocalLLMError as error:
-        raise RAGError(f"Локальная модель недоступна: {error}") from error
-
-    if len(content) > max_tokens * 6:
-        content = content[: max_tokens * 6].rstrip()
-    return {
-        "content": content,
-        "model": chat.model,
-        "usage": {},
-    }
+    system_prompt = (
+        "Ты модуль локальной генерации CodeAgentCLI. Твоя единственная задача - дать точный "
+        "ответ на русском по предоставленному EVIDENCE.\n"
+        "Правила:\n"
+        "1. Используй только факты из EVIDENCE; не дополняй ответ знаниями модели.\n"
+        "2. Копируй пути, команды, имена файлов, моделей, параметров и числовые значения дословно.\n"
+        "3. Search aliases помогают понять запрос, но не являются доказательствами.\n"
+        "4. Если прямого ответа нет, выведи ровно: Не знаю.\n"
+        "5. Не создавай источники и цитаты: их добавляет CLI.\n"
+        "6. Дай только ответ без рассуждений о процессе поиска."
+    )
+    user_prompt = (
+        "<SEARCH_ALIASES>\n"
+        f"{aliases.strip() or 'нет'}\n"
+        "</SEARCH_ALIASES>\n\n"
+        "<EVIDENCE>\n"
+        f"{evidence}\n"
+        "</EVIDENCE>\n\n"
+        "<QUESTION>\n"
+        f"{question}\n"
+        "</QUESTION>\n\n"
+        "<OUTPUT_FORMAT>\n"
+        "Один точный факт или 2-4 коротких пункта. Начни с `Ответ:`. "
+        "Не повторяй вопрос.\n"
+        "</OUTPUT_FORMAT>"
+    )
+    return system_prompt, user_prompt
 
 
 def render_rag_context(chunks: list[dict[str, Any]]) -> str:
