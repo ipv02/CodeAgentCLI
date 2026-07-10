@@ -270,6 +270,87 @@ agent --local-chat
 /exit
 ```
 
+### Приватный LLM-сервис по HTTP
+
+`agent --llm-service` поднимает приватный HTTP gateway к локальной Ollama-модели.
+Ollama остается backend-сервисом, а наружу публикуется API CodeAgentCLI с auth,
+rate limit и ограничениями контекста.
+
+Локальный запуск только на этой машине:
+
+```bash
+agent --llm-service
+```
+
+Запуск на VPS или домашнем сервере для доступа по сети:
+
+```bash
+CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
+agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
+```
+
+Если `--llm-service-host` не loopback-адрес, API key обязателен. Это защищает от
+случайной публикации локальной модели без авторизации.
+
+Основные endpoints:
+
+```text
+GET  /chat
+GET  /health
+GET  /v1/models
+POST /v1/chat
+POST /v1/chat/completions
+```
+
+Браузерный чат:
+
+```text
+http://SERVER_IP:8080/chat
+```
+
+Если сервис запущен с `CODE_AGENT_LLM_SERVICE_API_KEY`, введите этот token в
+поле `Bearer token`. История чата хранится в текущей вкладке браузера и
+отправляется в `/v1/chat` вместе с новым сообщением.
+
+Проверка с другой машины:
+
+```bash
+curl http://SERVER_IP:8080/health
+
+curl http://SERVER_IP:8080/v1/chat \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-private-token' \
+  -d '{"messages":[{"role":"user","content":"Ответь одним предложением: что такое приватная LLM?"}]}'
+```
+
+OpenAI-compatible форма:
+
+```bash
+curl http://SERVER_IP:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-private-token' \
+  -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"Привет"}],"temperature":0,"max_tokens":128}'
+```
+
+Лимиты сервиса:
+
+```bash
+CODE_AGENT_LLM_SERVICE_RATE_LIMIT=30 \
+CODE_AGENT_LLM_SERVICE_MAX_BODY_BYTES=131072 \
+CODE_AGENT_LLM_SERVICE_MAX_MESSAGES=32 \
+CODE_AGENT_LLM_SERVICE_MAX_MESSAGE_CHARS=16000 \
+CODE_AGENT_LOCAL_NUM_CTX=4096 \
+CODE_AGENT_LOCAL_NUM_PREDICT=512 \
+agent --llm-service
+```
+
+`CODE_AGENT_LOCAL_NUM_CTX` задает максимальное контекстное окно, а
+`CODE_AGENT_LOCAL_NUM_PREDICT` ограничивает длину ответа. Запросы с `num_ctx` или
+`max_tokens` выше лимита сервиса отклоняются.
+
+Для стабильного production-запуска обычно держат Ollama на `127.0.0.1:11434`,
+а `agent --llm-service` публикуют через firewall или reverse proxy с HTTPS.
+
 Подключить pipeline MCP и построить индекс проекта:
 
 ```text

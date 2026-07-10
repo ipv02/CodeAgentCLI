@@ -34,6 +34,13 @@ from code_agent_cli.local_llm import (
     LocalLLMChatService,
     LocalLLMError,
 )
+from code_agent_cli.llm_service import (
+    DEFAULT_LLM_SERVICE_HOST,
+    DEFAULT_LLM_SERVICE_PORT,
+    LLMServiceConfig,
+    run_llm_service,
+    validate_service_exposure,
+)
 from code_agent_cli.local_rag_optimization import run_local_rag_optimization
 from code_agent_cli.mcp_config import (
     MCPConfig,
@@ -229,6 +236,10 @@ def main() -> None:
         )
         return
 
+    if args.llm_service:
+        run_llm_service_command(args)
+        return
+
     if args.local_chat:
         run_local_chat_session(args.local_model)
         return
@@ -353,6 +364,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare baseline and optimized local Ollama generation on the same retrieved document evidence.",
     )
     parser.add_argument(
+        "--llm-service",
+        action="store_true",
+        help="Start a private HTTP API gateway for the local Ollama model.",
+    )
+    parser.add_argument(
+        "--llm-service-host",
+        default=os.getenv("CODE_AGENT_LLM_SERVICE_HOST", DEFAULT_LLM_SERVICE_HOST),
+        help="Host for --llm-service. Defaults to 127.0.0.1.",
+    )
+    parser.add_argument(
+        "--llm-service-port",
+        type=int,
+        default=env_int("CODE_AGENT_LLM_SERVICE_PORT", DEFAULT_LLM_SERVICE_PORT),
+        help="Port for --llm-service. Defaults to 8080.",
+    )
+    parser.add_argument(
+        "--llm-service-api-key",
+        default=os.getenv("CODE_AGENT_LLM_SERVICE_API_KEY", ""),
+        help="Bearer token for --llm-service. Required when listening on a non-loopback host.",
+    )
+    parser.add_argument(
         "--optimization-questions",
         type=int,
         default=3,
@@ -370,8 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--local-model",
         default=None,
         help=(
-            "Ollama model for --local-chat, --local-context-chat or "
-            "--local-rag-optimize. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b."
+            "Ollama model for --local-chat, --local-context-chat, --local-rag-optimize "
+            "or --llm-service. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b."
         ),
     )
     return parser
@@ -395,11 +427,16 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.mcp_config_tools
         or args.mcp_init_apple
     )
-    local_mode_enabled = args.local_chat or args.local_context_chat or args.local_rag_optimize
+    local_mode_enabled = (
+        args.local_chat
+        or args.local_context_chat
+        or args.local_rag_optimize
+        or args.llm_service
+    )
     if args.local_model and not local_mode_enabled:
         parser.error(
             "--local-model можно использовать только вместе с --local-chat, "
-            "--local-context-chat или --local-rag-optimize."
+            "--local-context-chat, --local-rag-optimize или --llm-service."
         )
 
     rag_mode_enabled = args.rag_chat or args.rag_chat_check
@@ -414,7 +451,12 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Контекстный чат нельзя совмещать с MCP-режимами.")
 
     if local_mode_enabled:
-        local_modes = [args.local_chat, args.local_context_chat, args.local_rag_optimize]
+        local_modes = [
+            args.local_chat,
+            args.local_context_chat,
+            args.local_rag_optimize,
+            args.llm_service,
+        ]
         if sum(1 for enabled in local_modes if enabled) > 1:
             parser.error("Локальные режимы нельзя использовать одновременно.")
         if args.prompt:
@@ -435,6 +477,19 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--optimization-questions должен быть в диапазоне 1-10.")
     if not 1 <= args.optimization_repeats <= 5:
         parser.error("--optimization-repeats должен быть в диапазоне 1-5.")
+
+    if args.llm_service_port < 1 or args.llm_service_port > 65535:
+        parser.error("--llm-service-port должен быть в диапазоне 1-65535.")
+    if not args.llm_service:
+        default_host = os.getenv("CODE_AGENT_LLM_SERVICE_HOST", DEFAULT_LLM_SERVICE_HOST)
+        default_port = env_int("CODE_AGENT_LLM_SERVICE_PORT", DEFAULT_LLM_SERVICE_PORT)
+        default_key = os.getenv("CODE_AGENT_LLM_SERVICE_API_KEY", "")
+        if (
+            args.llm_service_host != default_host
+            or args.llm_service_port != default_port
+            or args.llm_service_api_key != default_key
+        ):
+            parser.error("--llm-service-host, --llm-service-port и --llm-service-api-key используются только вместе с --llm-service.")
 
     if not mcp_mode_enabled:
         return
@@ -2632,6 +2687,42 @@ def print_local_context_startup_summary(agent: CodeAgent, local_llm: LocalLLMCha
     )
     print(status_line("История", f"{status['history_messages']}/{status['max_history_messages']} · загружена"))
     print("Введите /help для списка команд.")
+
+
+def run_llm_service_command(args: argparse.Namespace) -> None:
+    chat = LocalLLMChatService(model=args.local_model) if args.local_model else LocalLLMChatService()
+    config = LLMServiceConfig(
+        host=args.llm_service_host,
+        port=args.llm_service_port,
+        api_key=args.llm_service_api_key,
+    ).normalized()
+    try:
+        validate_service_exposure(config)
+    except ValueError as error:
+        print(f"Ошибка LLM-сервиса: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+    print(colorize("Code Agent CLI · LLM service", BOLD + ACCENT))
+    print(status_line("HTTP API", f"http://{config.host}:{config.port}", SUCCESS))
+    print(status_line("Модель", chat.model, VALUE))
+    print(status_line("Ollama", chat.ollama_url, VALUE))
+    print(status_line("Auth", "Bearer token" if config.api_key else "off", SUCCESS if config.api_key else WARNING))
+    print(status_line("Rate limit", f"{config.rate_limit_per_minute} запросов/мин", VALUE))
+    print(status_line("Context window", str(chat.num_ctx), VALUE))
+    print(status_line("Max tokens", str(chat.num_predict), VALUE))
+    print(indented_line("Endpoints: GET /chat, GET /health, GET /v1/models, POST /v1/chat, POST /v1/chat/completions"))
+    try:
+        run_llm_service(
+            host=config.host,
+            port=config.port,
+            model=chat.model,
+            api_key=config.api_key,
+        )
+    except KeyboardInterrupt:
+        print()
+    except OSError as error:
+        print(f"Ошибка LLM-сервиса: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 def run_local_chat_session(model: str | None = None) -> None:
