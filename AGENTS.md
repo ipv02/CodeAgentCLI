@@ -247,14 +247,21 @@ Ollama model as a private service. It must:
 - not require `DEEPSEEK_API_KEY`;
 - keep Ollama as the backend, defaulting to `http://127.0.0.1:11434`;
 - expose a browser chat UI at `/` and `/chat`;
-- expose HTTP API endpoints `GET /health`, `GET /v1/models`, `POST /v1/chat`
-  and `POST /v1/chat/completions`;
+- expose HTTP API endpoints `GET /health`, `GET /service/status`,
+  `GET /v1/models`, `POST /auth/login`, `POST /auth/logout`,
+  `POST /v1/chat` and `POST /v1/chat/completions`;
 - support network deployment on a VPS or home server through
   `--llm-service-host` and `--llm-service-port`;
-- require `CODE_AGENT_LLM_SERVICE_API_KEY` or `--llm-service-api-key` when
-  binding to a non-loopback host such as `0.0.0.0`;
+- require login/password auth through `CODE_AGENT_LLM_SERVICE_USERNAME` and
+  `CODE_AGENT_LLM_SERVICE_PASSWORD`, or Bearer auth through
+  `CODE_AGENT_LLM_SERVICE_API_KEY`, when binding to a non-loopback host such
+  as `0.0.0.0`;
 - keep `/v1/chat` stateless: clients send the message history with each
   request, and the service validates limits before calling Ollama;
+- prepend the service system prompt to chat requests. The default domain is
+  cinema: films, actors, directors, genres, film history, recommendations and
+  scene analysis. Allow overriding it through
+  `CODE_AGENT_LLM_SERVICE_SYSTEM_PROMPT`;
 - enforce basic limits through `CODE_AGENT_LLM_SERVICE_RATE_LIMIT`,
   `CODE_AGENT_LLM_SERVICE_MAX_BODY_BYTES`,
   `CODE_AGENT_LLM_SERVICE_MAX_MESSAGES`,
@@ -266,14 +273,16 @@ network-access check. `127.0.0.1` only verifies same-machine access. A complete
 service check should start the gateway on a non-loopback host, for example:
 
 ```bash
-CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
+CODE_AGENT_LLM_SERVICE_USERNAME='admin' \
+CODE_AGENT_LLM_SERVICE_PASSWORD='replace-with-strong-password' \
 agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
 ```
 
 Then verify browser chat and `/v1/chat` from another device or through the
 server's LAN/VPN/public IP, for example `http://SERVER_IP:8080/chat`. Also
-verify auth, multiple sequential requests, `CODE_AGENT_LLM_SERVICE_RATE_LIMIT`
-and max context rejection through `num_ctx` above `CODE_AGENT_LOCAL_NUM_CTX`.
+verify login/password auth, optional Bearer auth for API clients, multiple
+sequential chat requests, `CODE_AGENT_LLM_SERVICE_RATE_LIMIT` and max context
+rejection through `num_ctx` above `CODE_AGENT_LOCAL_NUM_CTX`.
 
 Keep the service implementation isolated in `code_agent_cli/llm_service.py`
 where possible. `main.py` should only parse CLI flags, validate mode
@@ -282,6 +291,10 @@ compatibility and start the service.
 The browser chat UI should stay lightweight and dependency-free. It should:
 - store chat history only in the current browser tab;
 - send that history to `/v1/chat` on every user message;
+- keep the visible header minimal: model, max context, max output and rate
+  limit;
+- show available per-answer metadata below each assistant reply, including
+  rate limit, max context, max output and Ollama usage metrics when present;
 - avoid storing API tokens server-side or in persistent browser storage.
 
 ## Local Context Chat Guidelines

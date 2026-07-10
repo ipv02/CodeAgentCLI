@@ -66,9 +66,14 @@ class LLMServiceTests(unittest.TestCase):
         self.assertEqual(response.content_type, "text/html; charset=utf-8")
         self.assertIsNotNone(response.body)
         body = response.body.decode("utf-8") if response.body else ""
-        self.assertIn("CodeAgentCLI LLM Chat", body)
+        self.assertIn("Приватный кино-ассистент", body)
         self.assertIn("/v1/chat", body)
         self.assertIn('"authRequired": true', body)
+        self.assertIn("--bg: #1e1e2e", body)
+        self.assertIn("message-meta", body)
+        self.assertNotIn("serviceCheck", body)
+        self.assertIn('<form class="composer hidden" id="form">', body)
+        self.assertIn('<div class="tools hidden" id="tools">', body)
         self.assertEqual(app.chat.requests, [])
 
     def test_chat_requires_bearer_token_when_configured(self) -> None:
@@ -161,6 +166,67 @@ class LLMServiceTests(unittest.TestCase):
     def test_non_loopback_service_requires_api_key(self) -> None:
         with self.assertRaises(ValueError):
             validate_service_exposure(LLMServiceConfig(host="0.0.0.0", api_key=""))
+
+    def test_non_loopback_service_allows_login_password_auth(self) -> None:
+        validate_service_exposure(
+            LLMServiceConfig(host="0.0.0.0", api_key="", password="secret")
+        )
+
+    def test_login_sets_session_cookie_for_browser_api(self) -> None:
+        app = self.make_app(api_key="", rate_limit=30)
+        app.config = LLMServiceConfig(api_key="", username="admin", password="secret").normalized()
+
+        login = app.handle(
+            "POST",
+            "/auth/login",
+            {},
+            json_body({"username": "admin", "password": "secret"}),
+            "127.0.0.1",
+        )
+        cookie = login.headers["Set-Cookie"].split(";", 1)[0]
+        response = app.handle(
+            "POST",
+            "/v1/chat",
+            {"cookie": cookie},
+            json_body({"messages": [{"role": "user", "content": "hello"}]}),
+            "127.0.0.1",
+        )
+
+        self.assertEqual(login.status, 200)
+        self.assertEqual(response.status, 200)
+
+    def test_service_status_reports_network_checklist(self) -> None:
+        app = self.make_app(api_key="secret")
+        app.config = LLMServiceConfig(host="0.0.0.0", api_key="secret").normalized()
+
+        response = app.handle(
+            "GET",
+            "/service/status",
+            {"authorization": "Bearer secret"},
+            b"",
+            "127.0.0.1",
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.payload["network_mode"])
+        self.assertEqual(response.payload["chat_url_hint"], "http://SERVER_IP:8080/chat")
+        self.assertTrue(response.payload["checks"]["rate_limit"])
+
+    def test_chat_prepends_cinema_system_prompt(self) -> None:
+        app = self.make_app(api_key="")
+
+        response = app.handle(
+            "POST",
+            "/v1/chat",
+            {},
+            json_body({"messages": [{"role": "user", "content": "hello"}]}),
+            "127.0.0.1",
+        )
+
+        self.assertEqual(response.status, 200)
+        messages = app.chat.requests[0]["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("кино", messages[0]["content"])
 
 
 if __name__ == "__main__":

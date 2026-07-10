@@ -37,6 +37,7 @@ from code_agent_cli.local_llm import (
 from code_agent_cli.llm_service import (
     DEFAULT_LLM_SERVICE_HOST,
     DEFAULT_LLM_SERVICE_PORT,
+    DEFAULT_LLM_SERVICE_USERNAME,
     LLMServiceConfig,
     run_llm_service,
     validate_service_exposure,
@@ -382,7 +383,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-service-api-key",
         default=os.getenv("CODE_AGENT_LLM_SERVICE_API_KEY", ""),
-        help="Bearer token for --llm-service. Required when listening on a non-loopback host.",
+        help="Bearer token for --llm-service API clients.",
+    )
+    parser.add_argument(
+        "--llm-service-username",
+        default=os.getenv("CODE_AGENT_LLM_SERVICE_USERNAME", DEFAULT_LLM_SERVICE_USERNAME),
+        help="Browser login username for --llm-service. Defaults to admin.",
+    )
+    parser.add_argument(
+        "--llm-service-password",
+        default=os.getenv("CODE_AGENT_LLM_SERVICE_PASSWORD", ""),
+        help="Browser login password for --llm-service. Required for login/password auth.",
     )
     parser.add_argument(
         "--optimization-questions",
@@ -484,12 +495,16 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         default_host = os.getenv("CODE_AGENT_LLM_SERVICE_HOST", DEFAULT_LLM_SERVICE_HOST)
         default_port = env_int("CODE_AGENT_LLM_SERVICE_PORT", DEFAULT_LLM_SERVICE_PORT)
         default_key = os.getenv("CODE_AGENT_LLM_SERVICE_API_KEY", "")
+        default_username = os.getenv("CODE_AGENT_LLM_SERVICE_USERNAME", DEFAULT_LLM_SERVICE_USERNAME)
+        default_password = os.getenv("CODE_AGENT_LLM_SERVICE_PASSWORD", "")
         if (
             args.llm_service_host != default_host
             or args.llm_service_port != default_port
             or args.llm_service_api_key != default_key
+            or args.llm_service_username != default_username
+            or args.llm_service_password != default_password
         ):
-            parser.error("--llm-service-host, --llm-service-port и --llm-service-api-key используются только вместе с --llm-service.")
+            parser.error("Флаги --llm-service-* используются только вместе с --llm-service.")
 
     if not mcp_mode_enabled:
         return
@@ -2695,6 +2710,8 @@ def run_llm_service_command(args: argparse.Namespace) -> None:
         host=args.llm_service_host,
         port=args.llm_service_port,
         api_key=args.llm_service_api_key,
+        username=args.llm_service_username,
+        password=args.llm_service_password,
     ).normalized()
     try:
         validate_service_exposure(config)
@@ -2706,17 +2723,30 @@ def run_llm_service_command(args: argparse.Namespace) -> None:
     print(status_line("HTTP API", f"http://{config.host}:{config.port}", SUCCESS))
     print(status_line("Модель", chat.model, VALUE))
     print(status_line("Ollama", chat.ollama_url, VALUE))
-    print(status_line("Auth", "Bearer token" if config.api_key else "off", SUCCESS if config.api_key else WARNING))
+    auth_modes = []
+    if config.password:
+        auth_modes.append("login/password")
+    if config.api_key:
+        auth_modes.append("Bearer token")
+    print(status_line("Auth", ", ".join(auth_modes) or "off", SUCCESS if auth_modes else WARNING))
+    print(status_line("Domain", "cinema", VALUE))
     print(status_line("Rate limit", f"{config.rate_limit_per_minute} запросов/мин", VALUE))
     print(status_line("Context window", str(chat.num_ctx), VALUE))
     print(status_line("Max tokens", str(chat.num_predict), VALUE))
-    print(indented_line("Endpoints: GET /chat, GET /health, GET /v1/models, POST /v1/chat, POST /v1/chat/completions"))
+    print(
+        indented_line(
+            "Endpoints: GET /chat, GET /health, GET /service/status, "
+            "POST /auth/login, POST /v1/chat"
+        )
+    )
     try:
         run_llm_service(
             host=config.host,
             port=config.port,
             model=chat.model,
             api_key=config.api_key,
+            username=config.username,
+            password=config.password,
         )
     except KeyboardInterrupt:
         print()

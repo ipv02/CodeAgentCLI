@@ -274,7 +274,9 @@ agent --local-chat
 
 `agent --llm-service` поднимает приватный HTTP gateway к локальной Ollama-модели.
 Ollama остается backend-сервисом, а наружу публикуется API CodeAgentCLI с auth,
-rate limit и ограничениями контекста.
+rate limit, ограничениями контекста и браузерным чатом. По умолчанию сервис
+работает как cinema assistant: отвечает про кино, актеров, режиссеров, жанры,
+историю кинематографа, рекомендации и анализ сцен.
 
 Локальный запуск только на этой машине:
 
@@ -289,12 +291,23 @@ agent --llm-service
 Запуск на VPS или домашнем сервере для доступа по сети:
 
 ```bash
-CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
+CODE_AGENT_LLM_SERVICE_USERNAME='admin' \
+CODE_AGENT_LLM_SERVICE_PASSWORD='replace-with-strong-password' \
 agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
 ```
 
-Если `--llm-service-host` не loopback-адрес, API key обязателен. Это защищает от
-случайной публикации локальной модели без авторизации.
+Если `--llm-service-host` не loopback-адрес, нужна авторизация: login/password
+для браузера или Bearer token для API. Это защищает от случайной публикации
+локальной модели без авторизации.
+
+Bearer token для `curl` и внешних API-клиентов можно включить отдельно:
+
+```bash
+CODE_AGENT_LLM_SERVICE_USERNAME='admin' \
+CODE_AGENT_LLM_SERVICE_PASSWORD='replace-with-strong-password' \
+CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
+agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
+```
 
 Для домашнего сервера или Mac в локальной Wi-Fi сети узнайте IP машины:
 
@@ -323,7 +336,10 @@ group должны разрешать входящие подключения н
 ```text
 GET  /chat
 GET  /health
+GET  /service/status
 GET  /v1/models
+POST /auth/login
+POST /auth/logout
 POST /v1/chat
 POST /v1/chat/completions
 ```
@@ -335,18 +351,27 @@ http://SERVER_IP:8080/chat
 ```
 
 Если сервис запущен с `CODE_AGENT_LLM_SERVICE_API_KEY`, введите этот token в
-поле `Bearer token`. История чата хранится в текущей вкладке браузера и
-отправляется в `/v1/chat` вместе с новым сообщением.
+поле `Bearer token`. Если задан `CODE_AGENT_LLM_SERVICE_PASSWORD`, страница
+покажет форму логина и пароля. История чата хранится в текущей вкладке браузера
+и отправляется в `/v1/chat` вместе с новым сообщением.
+
+Страница `/chat` показывает модель, максимальный контекст, лимит ответа и rate
+limit. После каждого ответа модели под сообщением отображаются доступные
+метрики: rate limit, max context, max answer, prompt tokens, answer tokens и
+tokens/sec, если Ollama вернула эти данные.
 
 Проверка с другой машины:
 
 ```bash
 curl http://SERVER_IP:8080/health
 
+curl http://SERVER_IP:8080/service/status \
+  -H 'Authorization: Bearer replace-with-private-token'
+
 curl http://SERVER_IP:8080/v1/chat \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer replace-with-private-token' \
-  -d '{"messages":[{"role":"user","content":"Ответь одним предложением: что такое приватная LLM?"}]}'
+  -d '{"messages":[{"role":"user","content":"Посоветуй 3 фильма в жанре нуар и объясни выбор."}]}'
 ```
 
 Для проверки задания "доступ к модели по сети" запускайте `curl` не на той же
@@ -370,6 +395,8 @@ CODE_AGENT_LLM_SERVICE_MAX_MESSAGES=32 \
 CODE_AGENT_LLM_SERVICE_MAX_MESSAGE_CHARS=16000 \
 CODE_AGENT_LOCAL_NUM_CTX=4096 \
 CODE_AGENT_LOCAL_NUM_PREDICT=512 \
+CODE_AGENT_LLM_SERVICE_USERNAME='admin' \
+CODE_AGENT_LLM_SERVICE_PASSWORD='replace-with-strong-password' \
 agent --llm-service
 ```
 
@@ -392,6 +419,8 @@ curl http://SERVER_IP:8080/v1/chat \
 
 ```bash
 CODE_AGENT_LLM_SERVICE_RATE_LIMIT=2 \
+CODE_AGENT_LLM_SERVICE_USERNAME='admin' \
+CODE_AGENT_LLM_SERVICE_PASSWORD='replace-with-strong-password' \
 CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
 agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
 ```
@@ -402,6 +431,13 @@ agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
 
 Для стабильного production-запуска обычно держат Ollama на `127.0.0.1:11434`,
 а `agent --llm-service` публикуют через firewall или reverse proxy с HTTPS.
+
+Системный prompt сервиса можно переопределить:
+
+```bash
+CODE_AGENT_LLM_SERVICE_SYSTEM_PROMPT='Ты приватный AI-ассистент по истории кино...' \
+agent --llm-service
+```
 
 Подключить pipeline MCP и построить индекс проекта:
 
