@@ -261,6 +261,20 @@ Ollama model as a private service. It must:
   `CODE_AGENT_LLM_SERVICE_MAX_MESSAGE_CHARS`,
   `CODE_AGENT_LOCAL_NUM_CTX` and `CODE_AGENT_LOCAL_NUM_PREDICT`.
 
+For network deployment tasks, do not treat `http://127.0.0.1:8080/chat` as a
+network-access check. `127.0.0.1` only verifies same-machine access. A complete
+service check should start the gateway on a non-loopback host, for example:
+
+```bash
+CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
+agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
+```
+
+Then verify browser chat and `/v1/chat` from another device or through the
+server's LAN/VPN/public IP, for example `http://SERVER_IP:8080/chat`. Also
+verify auth, multiple sequential requests, `CODE_AGENT_LLM_SERVICE_RATE_LIMIT`
+and max context rejection through `num_ctx` above `CODE_AGENT_LOCAL_NUM_CTX`.
+
 Keep the service implementation isolated in `code_agent_cli/llm_service.py`
 where possible. `main.py` should only parse CLI flags, validate mode
 compatibility and start the service.

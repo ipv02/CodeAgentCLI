@@ -282,6 +282,10 @@ rate limit и ограничениями контекста.
 agent --llm-service
 ```
 
+Адрес `http://127.0.0.1:8080/chat` подходит только для проверки на той же
+машине, где запущен сервис. С телефона, другого компьютера или VPS-клиента
+нужно обращаться по сетевому IP сервера.
+
 Запуск на VPS или домашнем сервере для доступа по сети:
 
 ```bash
@@ -291,6 +295,28 @@ agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
 
 Если `--llm-service-host` не loopback-адрес, API key обязателен. Это защищает от
 случайной публикации локальной модели без авторизации.
+
+Для домашнего сервера или Mac в локальной Wi-Fi сети узнайте IP машины:
+
+```bash
+ipconfig getifaddr en0
+```
+
+Если команда вернула `192.168.1.25`, с телефона или другого компьютера в той же
+сети открывайте:
+
+```text
+http://192.168.1.25:8080/chat
+```
+
+Для VPS используйте публичный или VPN/private IP сервера:
+
+```text
+http://SERVER_IP:8080/chat
+```
+
+Телефон или другой клиент должен видеть этот IP по сети, а firewall/security
+group должны разрешать входящие подключения на выбранный порт.
 
 Основные endpoints:
 
@@ -323,6 +349,9 @@ curl http://SERVER_IP:8080/v1/chat \
   -d '{"messages":[{"role":"user","content":"Ответь одним предложением: что такое приватная LLM?"}]}'
 ```
 
+Для проверки задания "доступ к модели по сети" запускайте `curl` не на той же
+машине через `127.0.0.1`, а с другого устройства или через `SERVER_IP`.
+
 OpenAI-compatible форма:
 
 ```bash
@@ -347,6 +376,29 @@ agent --llm-service
 `CODE_AGENT_LOCAL_NUM_CTX` задает максимальное контекстное окно, а
 `CODE_AGENT_LOCAL_NUM_PREDICT` ограничивает длину ответа. Запросы с `num_ctx` или
 `max_tokens` выше лимита сервиса отклоняются.
+
+Проверка ограничения контекста:
+
+```bash
+curl http://SERVER_IP:8080/v1/chat \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer replace-with-private-token' \
+  -d '{"messages":[{"role":"user","content":"test"}],"num_ctx":999999}'
+```
+
+Ожидаемый результат: HTTP `400` с ошибкой `num_ctx_limit_exceeded`.
+
+Проверка rate limit:
+
+```bash
+CODE_AGENT_LLM_SERVICE_RATE_LIMIT=2 \
+CODE_AGENT_LLM_SERVICE_API_KEY='replace-with-private-token' \
+agent --llm-service --llm-service-host 0.0.0.0 --llm-service-port 8080
+```
+
+Сделайте три быстрых запроса к `/v1/chat` с другого устройства или через
+`SERVER_IP`. Ожидаемый результат: третий запрос возвращает HTTP `429` с ошибкой
+`rate_limit_exceeded`.
 
 Для стабильного production-запуска обычно держат Ollama на `127.0.0.1:11434`,
 а `agent --llm-service` публикуют через firewall или reverse proxy с HTTPS.
