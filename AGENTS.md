@@ -11,6 +11,8 @@ It includes:
 - MCP stdio server configuration and tool listing;
 - Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
 - local Ollama chat mode for running a local LLM through `agent --local-chat`;
+- private HTTP LLM service through `agent --llm-service`, with an API gateway
+  and browser chat UI over the local Ollama backend;
 - fully local context chat through `agent --local-context-chat`, with local
   retrieval and local Ollama answer generation;
 - reproducible local generation optimization checks through
@@ -32,6 +34,7 @@ Main responsibility areas:
 - MCP config loading, validation and stdio client integration;
 - local document indexing, retrieval, query rewriting, filtering and RAG evaluation;
 - local LLM chat through Ollama;
+- private HTTP LLM service gateway and browser chat UI;
 - internal subagent prompts and state-update logic.
 
 Keep these boundaries intact unless the task explicitly requires architectural changes. Before editing, inspect the relevant files instead of relying only on this guide.
@@ -69,6 +72,12 @@ Run local Ollama chat:
 ollama serve
 ollama pull llama3.2:3b
 agent --local-chat
+```
+
+Run the private HTTP LLM service:
+
+```bash
+agent --llm-service
 ```
 
 Run fully local context chat over the document index:
@@ -230,6 +239,36 @@ The local chat commands must remain available and readable:
 - `/pull`: show the shell command for downloading the selected model;
 - `/help`: show local chat help;
 - `/exit`: exit the local chat.
+
+## Private LLM Service Guidelines
+
+`agent --llm-service` is the user-facing HTTP gateway for exposing the local
+Ollama model as a private service. It must:
+- not require `DEEPSEEK_API_KEY`;
+- keep Ollama as the backend, defaulting to `http://127.0.0.1:11434`;
+- expose a browser chat UI at `/` and `/chat`;
+- expose HTTP API endpoints `GET /health`, `GET /v1/models`, `POST /v1/chat`
+  and `POST /v1/chat/completions`;
+- support network deployment on a VPS or home server through
+  `--llm-service-host` and `--llm-service-port`;
+- require `CODE_AGENT_LLM_SERVICE_API_KEY` or `--llm-service-api-key` when
+  binding to a non-loopback host such as `0.0.0.0`;
+- keep `/v1/chat` stateless: clients send the message history with each
+  request, and the service validates limits before calling Ollama;
+- enforce basic limits through `CODE_AGENT_LLM_SERVICE_RATE_LIMIT`,
+  `CODE_AGENT_LLM_SERVICE_MAX_BODY_BYTES`,
+  `CODE_AGENT_LLM_SERVICE_MAX_MESSAGES`,
+  `CODE_AGENT_LLM_SERVICE_MAX_MESSAGE_CHARS`,
+  `CODE_AGENT_LOCAL_NUM_CTX` and `CODE_AGENT_LOCAL_NUM_PREDICT`.
+
+Keep the service implementation isolated in `code_agent_cli/llm_service.py`
+where possible. `main.py` should only parse CLI flags, validate mode
+compatibility and start the service.
+
+The browser chat UI should stay lightweight and dependency-free. It should:
+- store chat history only in the current browser tab;
+- send that history to `/v1/chat` on every user message;
+- avoid storing API tokens server-side or in persistent browser storage.
 
 ## Local Context Chat Guidelines
 

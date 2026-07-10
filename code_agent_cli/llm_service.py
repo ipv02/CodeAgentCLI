@@ -636,15 +636,18 @@ def build_chat_page(page_config: dict[str, Any]) -> str:
       display: flex;
       flex-wrap: wrap;
       justify-content: flex-end;
-      gap: 8px;
+      gap: 10px;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 15px;
     }}
     .pill {{
-      border: 1px solid var(--border);
+      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
       border-radius: 999px;
-      padding: 3px 9px;
-      background: color-mix(in srgb, var(--panel) 82%, transparent);
+      padding: 7px 12px;
+      background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+      color: var(--accent);
+      font-weight: 800;
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel) 70%, transparent);
     }}
     main {{
       min-height: 0;
@@ -680,6 +683,34 @@ def build_chat_page(page_config: dict[str, Any]) -> str:
       max-width: 100%;
       color: var(--error);
       background: transparent;
+    }}
+    .message.loading {{
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--muted);
+    }}
+    .loader {{
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 3px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+      border-top-color: var(--accent);
+      animation: spin 0.85s linear infinite;
+      flex: 0 0 auto;
+    }}
+    .loading-text::after {{
+      content: "";
+      animation: dots 1.1s steps(4, end) infinite;
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
+    @keyframes dots {{
+      0% {{ content: ""; }}
+      25% {{ content: "."; }}
+      50% {{ content: ".."; }}
+      75%, 100% {{ content: "..."; }}
     }}
     footer {{
       display: grid;
@@ -804,6 +835,22 @@ def build_chat_page(page_config: dict[str, Any]) -> str:
       item.textContent = content;
       messagesEl.appendChild(item);
       scrollEl.scrollTop = scrollEl.scrollHeight;
+      return item;
+    }}
+
+    function addLoadingMessage() {{
+      const item = document.createElement("div");
+      item.className = "message assistant loading";
+      const spinner = document.createElement("span");
+      spinner.className = "loader";
+      spinner.setAttribute("aria-hidden", "true");
+      const text = document.createElement("span");
+      text.className = "loading-text";
+      text.textContent = "Локальная модель отвечает";
+      item.append(spinner, text);
+      messagesEl.appendChild(item);
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+      return item;
     }}
 
     function setBusy(isBusy) {{
@@ -815,6 +862,7 @@ def build_chat_page(page_config: dict[str, Any]) -> str:
     async function sendMessage(text) {{
       messages.push({{ role: "user", content: text }});
       addMessage("user", text);
+      const loadingEl = addLoadingMessage();
       setBusy(true);
       try {{
         const headers = {{ "Content-Type": "application/json" }};
@@ -834,9 +882,11 @@ def build_chat_page(page_config: dict[str, Any]) -> str:
         }}
         const answer = payload.content || "";
         messages.push({{ role: "assistant", content: answer }});
+        loadingEl.remove();
         addMessage("assistant", answer);
       }} catch (error) {{
         messages.pop();
+        loadingEl.remove();
         addMessage("error", error.message || String(error));
       }} finally {{
         setBusy(false);
