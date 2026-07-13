@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
@@ -215,6 +216,46 @@ class PipelineService:
             max_files=max_files,
         )
 
+    def index_project_docs(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 700,
+        overlap: int = 80,
+        max_files: int = 80,
+    ) -> dict[str, Any]:
+        return DocumentIndexService().index_project_docs(
+            path,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            max_files=max_files,
+        )
+
+    def project_git_branch(self, path: str) -> dict[str, Any]:
+        root = Path(path).expanduser().resolve()
+        if not root.is_dir():
+            raise PipelineError(f"Папка проекта не найдена: {root}")
+
+        try:
+            repository = run_git(root, "rev-parse", "--show-toplevel")
+            branch = run_git(root, "branch", "--show-current")
+            detached = not branch
+            if detached:
+                branch = run_git(root, "rev-parse", "--short", "HEAD")
+        except FileNotFoundError as error:
+            raise PipelineError("Команда git не найдена.") from error
+        except subprocess.TimeoutExpired as error:
+            raise PipelineError("Git не ответил за 5 секунд.") from error
+        except subprocess.CalledProcessError as error:
+            message = (error.stderr or error.stdout or "неизвестная ошибка").strip()
+            raise PipelineError(f"Не удалось получить Git-ветку: {message}") from error
+
+        return {
+            "repository": repository,
+            "branch": branch,
+            "detached": detached,
+        }
+
     def index_status(self) -> dict[str, Any]:
         return DocumentIndexService().status()
 
@@ -297,6 +338,18 @@ class PipelineService:
             max_questions=max_questions,
             run_answers=run_answers,
         )
+
+
+def run_git(cwd: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def parse_duckduckgo_html(html: str, *, limit: int) -> list[SearchResult]:

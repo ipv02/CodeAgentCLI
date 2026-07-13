@@ -131,6 +131,7 @@ class DocumentIndexService:
         chunk_size: int = DEFAULT_CHUNK_SIZE_TOKENS,
         overlap: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
         max_files: int = DEFAULT_MAX_FILES,
+        project_docs_only: bool = False,
     ) -> dict[str, Any]:
         root = Path(path).expanduser().resolve()
         if not root.exists():
@@ -147,8 +148,16 @@ class DocumentIndexService:
             raise DocumentIndexError("max_files должен быть положительным числом.")
 
         selected_strategies = normalize_strategies(strategies)
-        documents, skipped = load_documents(root, max_files=max_files)
+        documents, skipped = (
+            load_project_documents(root, max_files=max_files)
+            if project_docs_only
+            else load_documents(root, max_files=max_files)
+        )
         if not documents:
+            if project_docs_only:
+                raise DocumentIndexError(
+                    "Не найдены README и документы в docs/ или project/docs/."
+                )
             raise DocumentIndexError("Не найдено документов для индексации.")
 
         chunks: list[DocumentChunk] = []
@@ -190,6 +199,25 @@ class DocumentIndexService:
             encoding="utf-8",
         )
         return report | {"report_path": str(self.report_path)}
+
+    def index_project_docs(
+        self,
+        path: str,
+        *,
+        strategies: list[str] | None = None,
+        chunk_size: int = DEFAULT_CHUNK_SIZE_TOKENS,
+        overlap: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+        max_files: int = DEFAULT_MAX_FILES,
+    ) -> dict[str, Any]:
+        """Index only project README files and documentation directories."""
+        return self.index_path(
+            path,
+            strategies=strategies,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            max_files=max_files,
+            project_docs_only=True,
+        )
 
     def status(self) -> dict[str, Any]:
         if not self.db_path.exists():
@@ -291,9 +319,44 @@ def normalize_strategies(strategies: list[str] | None) -> list[str]:
 
 def load_documents(root: Path, *, max_files: int) -> tuple[list[SourceDocument], list[dict[str, str]]]:
     paths = [root] if root.is_file() else list(iter_document_paths(root))
+    return load_document_paths(paths, base=root.parent if root.is_file() else root, max_files=max_files)
+
+
+def load_project_documents(
+    root: Path,
+    *,
+    max_files: int,
+) -> tuple[list[SourceDocument], list[dict[str, str]]]:
+    if not root.is_dir():
+        raise DocumentIndexError(
+            "Для индексации документации проекта укажите корневую папку проекта."
+        )
+
+    paths: list[Path] = []
+    for path in sorted(root.iterdir()):
+        if (
+            path.is_file()
+            and path.name.lower().startswith("readme")
+            and path.suffix.lower() in TEXT_EXTENSIONS | PDF_EXTENSIONS
+        ):
+            paths.append(path)
+
+    for docs_dir in (root / "docs", root / "project" / "docs"):
+        if docs_dir.is_dir():
+            paths.extend(iter_document_paths(docs_dir))
+
+    unique_paths = list(dict.fromkeys(paths))
+    return load_document_paths(unique_paths, base=root, max_files=max_files)
+
+
+def load_document_paths(
+    paths: list[Path],
+    *,
+    base: Path,
+    max_files: int,
+) -> tuple[list[SourceDocument], list[dict[str, str]]]:
     documents: list[SourceDocument] = []
     skipped: list[dict[str, str]] = []
-    base = root.parent if root.is_file() else root
     for path in paths:
         if len(documents) >= max_files:
             skipped.append({"source": str(path), "reason": f"max_files={max_files}"})

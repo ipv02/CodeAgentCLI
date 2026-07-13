@@ -93,6 +93,32 @@ def index_documents(
 
 
 @mcp.tool(
+    title="Index project documentation",
+    description="Index README files plus docs/ and project/docs/ for developer-assistant questions.",
+)
+def index_project_docs(
+    path: str = ".",
+    chunk_size: int = 700,
+    overlap: int = 80,
+    max_files: int = 80,
+) -> dict[str, Any]:
+    return service().index_project_docs(
+        path,
+        chunk_size=chunk_size,
+        overlap=overlap,
+        max_files=max_files,
+    )
+
+
+@mcp.tool(
+    title="Current project Git branch",
+    description="Return the current Git branch for a project without modifying the repository.",
+)
+def project_git_branch(path: str = ".") -> dict[str, Any]:
+    return service().project_git_branch(path)
+
+
+@mcp.tool(
     title="Document index status",
     description="Return status and aggregate counts for the local document index.",
 )

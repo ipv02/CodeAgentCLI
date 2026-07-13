@@ -593,7 +593,8 @@ def print_mcp_config_tools(config: MCPConfig, timeout: float) -> bool:
     if not config.servers:
         return True
 
-    checks = check_mcp_config_servers(config, timeout)
+    with loader("Получаю список MCP tools"):
+        checks = check_mcp_config_servers(config, timeout)
     print()
 
     for index, check in enumerate(checks, start=1):
@@ -692,7 +693,9 @@ def print_mcp_help() -> None:
                 (
                     ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
                     ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
+                    ("/mcp index-project-docs PATH", "индексировать README, docs/ и project/docs/"),
                     ("/mcp index-status", "показать статус локального индекса документов"),
+                    ("/mcp git-branch [PATH]", "получить текущую Git-ветку через read-only MCP tool"),
                     ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
                     ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
                     ("/mcp rag-answer QUESTION", "ответить с verified sources/quotes или сказать Не знаю"),
@@ -718,6 +721,8 @@ def print_mcp_help() -> None:
             "/mcp clear-scheduler",
             '/mcp pipeline "latest MCP protocol news" mcp-summary.md',
             "/mcp index-docs .",
+            "/mcp index-project-docs .",
+            "/mcp git-branch .",
             "/mcp compare-chunking",
             '/mcp rag-search "Какая Ollama модель используется для embeddings?"',
             '/mcp rag-compare "Где хранится MCP config?"',
@@ -1482,6 +1487,24 @@ def handle_pipeline_short_command(config_path: Path, command: str, argument: str
         )
         return True
 
+    if command == "index-project-docs":
+        path = str(resolve_developer_project_path(argument))
+        call_pipeline_tool_from_short_command(
+            config_path,
+            "index_project_docs",
+            {"path": path},
+        )
+        return True
+
+    if command == "git-branch":
+        path = str(resolve_developer_project_path(argument))
+        call_pipeline_tool_from_short_command(
+            config_path,
+            "project_git_branch",
+            {"path": path},
+        )
+        return True
+
     if command in {"index-status", "docs-index-status"}:
         call_pipeline_tool_from_short_command(config_path, "index_status", {})
         return True
@@ -1639,8 +1662,15 @@ def print_pipeline_tool_call_result(
     if tool_name == "run":
         print_pipeline_run_result(payload)
         return True
-    if tool_name == "index_documents":
+    if tool_name in {"index_documents", "index_project_docs"}:
         print_document_index_result(payload)
+        return True
+    if tool_name == "project_git_branch":
+        print(status_line("Repository", str(payload.get("repository", "")), VALUE))
+        branch = str(payload.get("branch", ""))
+        if payload.get("detached"):
+            branch = f"detached at {branch}"
+        print(status_line("Git branch", branch, SUCCESS))
         return True
     if tool_name == "index_status":
         print_document_index_status(payload)
@@ -2527,6 +2557,139 @@ def indented_line(text: str, level: int = 1) -> str:
     return f"{MUTED}{line}{RESET}"
 
 
+def resolve_developer_project_path(argument: str = ".") -> Path:
+    clean_argument = argument.strip()
+    if clean_argument and clean_argument != ".":
+        return Path(clean_argument).expanduser().resolve()
+
+    configured = os.getenv("CODE_AGENT_PROJECT_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    current = Path.cwd().resolve()
+    if looks_like_project_root(current):
+        return current
+
+    package_root = Path(__file__).resolve().parents[1]
+    if looks_like_project_root(package_root):
+        return package_root
+    return current
+
+
+def looks_like_project_root(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    has_readme = any(
+        child.is_file() and child.name.lower().startswith("readme")
+        for child in path.iterdir()
+    )
+    has_project_marker = (path / ".git").exists() or (path / "pyproject.toml").is_file()
+    return has_readme and has_project_marker
+
+
+def call_builtin_pipeline_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    project_path: Path,
+    timeout: float,
+) -> MCPToolCallResult:
+    return asyncio.run(
+        call_mcp_tool(
+            sys.executable,
+            ["-m", "code_agent_cli.pipeline_mcp_server"],
+            tool_name,
+            arguments,
+            cwd=project_path,
+            timeout=timeout,
+        )
+    )
+
+
+def is_git_branch_question(question: str) -> bool:
+    lowered = question.lower()
+    has_branch_term = any(marker in lowered for marker in ("ветк", "branch"))
+    has_current_context = any(
+        marker in lowered
+        for marker in ("git", "текущ", "сейчас", "активн", "current")
+    )
+    return has_branch_term and has_current_context
+
+
+def run_developer_help(question: str, project_path: Path) -> None:
+    clean_question = question.strip()
+    if not clean_question:
+        print_help()
+        return
+
+    branch_payload: dict[str, Any] | None = None
+    branch_error = ""
+    try:
+        with loader("Получаю Git-контекст через MCP"):
+            branch_result = call_builtin_pipeline_tool(
+                "project_git_branch",
+                {"path": str(project_path)},
+                project_path=project_path,
+                timeout=15.0,
+            )
+        if branch_result.is_error:
+            branch_error = branch_result.as_text()
+        else:
+            branch_payload = parse_mcp_json_result(branch_result)
+            if branch_payload is None:
+                branch_error = "MCP вернул некорректный Git-контекст."
+    except MCPConnectionError as error:
+        branch_error = str(error)
+
+    print(header_line("Ассистент разработчика"))
+    print(status_line("Проект", str(project_path), VALUE))
+    if branch_payload is not None:
+        branch = str(branch_payload.get("branch", ""))
+        if branch_payload.get("detached"):
+            branch = f"detached at {branch}"
+        print(status_line("Git-ветка (MCP)", branch, SUCCESS))
+    else:
+        print(status_line("Git-контекст", branch_error or "недоступен", WARNING))
+
+    if is_git_branch_question(clean_question) and branch_payload is not None:
+        print()
+        print_multiline_value(
+            "Ответ",
+            f"Текущая Git-ветка проекта: {branch_payload.get('branch', '')}.",
+        )
+        return
+
+    try:
+        with loader("Ищу ответ в документации через MCP"):
+            rag_result = call_builtin_pipeline_tool(
+                "rag_answer",
+                {"question": clean_question, "use_rag": True},
+                project_path=project_path,
+                timeout=180.0,
+            )
+    except MCPConnectionError as error:
+        print()
+        print(status_line("Ошибка MCP", str(error), ERROR))
+        print(indented_line("Проверьте Ollama и выполните /mcp index-project-docs ."))
+        return
+
+    if rag_result.is_error:
+        print()
+        print(status_line("Ответ по документации", "недоступен", ERROR))
+        print_multiline_value("Причина", rag_result.as_text())
+        print(indented_line("Подготовить индекс: /mcp init-pipeline, затем /mcp index-project-docs ."))
+        return
+
+    rag_payload = parse_mcp_json_result(rag_result)
+    if rag_payload is None:
+        print()
+        print(status_line("Ошибка MCP", "сервер вернул некорректный RAG payload", ERROR))
+        return
+
+    print()
+    print_rag_answer_result(rag_payload)
+
+
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
     print_startup_summary(agent)
@@ -2555,13 +2718,16 @@ def run_interactive_session(agent: CodeAgent) -> None:
             print("История, память, профиль и ветки очищены. Инварианты сохранены.")
             continue
 
-        if text == "/help":
-            print_help()
-            continue
-
         command, _, argument = text.partition(" ")
         command = command.lower()
         argument = argument.strip()
+
+        if command == "/help":
+            if argument:
+                run_developer_help(argument, resolve_developer_project_path())
+            else:
+                print_help()
+            continue
 
         if command == "/status":
             print_status(agent)
@@ -3592,6 +3758,7 @@ def print_help() -> None:
         "Базовые команды",
         (
             ("/help", "показать помощь"),
+            ("/help QUESTION", "ответить о проекте по документации и Git-контексту через MCP"),
             ("/status", "показать настройки текущей сессии"),
             ("/reset", "очистить историю, память, профиль и ветки; инварианты сохраняются"),
             ("/exit", "выйти"),
@@ -3708,7 +3875,9 @@ def print_help() -> None:
                 (
                     ("/mcp pipeline QUERY FILE", "запустить search -> summarize -> save"),
                     ("/mcp index-docs PATH", "построить локальный индекс документов через Ollama embeddings"),
+                    ("/mcp index-project-docs PATH", "индексировать README, docs/ и project/docs/"),
                     ("/mcp index-status", "показать статус локального индекса документов"),
+                    ("/mcp git-branch [PATH]", "получить текущую Git-ветку через read-only MCP tool"),
                     ("/mcp compare-chunking", "сравнить fixed и structural chunking"),
                     ("/mcp rag-search QUESTION", "enhanced search: query rewrite, similarity filter и heuristic rerank"),
                     ("/mcp rag-answer QUESTION", "ответить с verified sources/quotes или сказать Не знаю"),
@@ -4512,7 +4681,7 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
         init_orchestration_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-status | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-answer-local QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-project-docs PATH | /mcp index-status | /mcp git-branch [PATH] | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-answer-local QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

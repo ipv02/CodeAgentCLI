@@ -67,6 +67,16 @@ agent
 /quit
 ```
 
+`/help` без аргументов показывает список команд. Если передать вопрос, команда
+работает как ассистент разработчика: получает Git-ветку через встроенный MCP tool
+и отвечает по локальному индексу проектной документации:
+
+```text
+/help Как устроен CodeAgentCLI?
+/help Где реализован локальный поиск по документам?
+/help Какая сейчас Git-ветка?
+```
+
 История диалога сохраняется между запусками в:
 
 ```text
@@ -198,6 +208,19 @@ README, Markdown/TXT/RST, Python-код, JSON/YAML/TOML и PDF при устан
 ollama serve
 ollama pull nomic-embed-text
 ```
+
+Для ассистента разработчика подключите встроенный Pipeline MCP и проиндексируйте
+только `README`, `docs/` и `project/docs/`:
+
+```text
+/mcp init-pipeline
+/mcp index-project-docs .
+/mcp git-branch .
+/help Как устроена архитектура проекта?
+```
+
+Команда `/mcp index-docs PATH` остается доступной для индексации всех
+поддерживаемых документов и исходников по указанному пути.
 
 ### Локальный чат через Ollama
 
@@ -1420,6 +1443,7 @@ export CODE_AGENT_INPUT_PRICE_PER_1M="0.28"
 export CODE_AGENT_OUTPUT_PRICE_PER_1M="0.42"
 export CODE_AGENT_MAX_FILE_BYTES="122880"
 export CODE_AGENT_HISTORY_FILE="$HOME/.code-agent-cli/history.json"
+export CODE_AGENT_PROJECT_DIR="/path/to/project"
 ```
 
 Текущие настройки:
