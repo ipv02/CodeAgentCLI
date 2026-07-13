@@ -6,6 +6,7 @@ CodeAgentCLI is a Python 3.14+ terminal coding assistant.
 
 It includes:
 - CLI interaction and one-shot prompt execution;
+- project-aware developer help through `/help QUESTION` over RAG and MCP;
 - DeepSeek-compatible chat completions;
 - local history, profile memory and invariants;
 - MCP stdio server configuration and tool listing;
@@ -143,7 +144,33 @@ When changing MCP behavior:
 - validate config before saving;
 - keep failures user-friendly;
 - preserve `/mcp add`, `/mcp remove`, `/mcp clear`, `/mcp show`, `/mcp tools` and `/mcp test`;
+- keep the visible loader while `/mcp tools` connects to configured servers;
 - treat external MCP servers as unreliable.
+
+## Developer Assistant Guidelines
+
+`/help` without arguments must continue to show the regular CLI command help.
+`/help QUESTION` is the project-aware developer assistant and must:
+- resolve the project root from an explicit path, `CODE_AGENT_PROJECT_DIR`, the
+  current project directory or the editable CodeAgentCLI checkout;
+- obtain the current Git branch through the read-only Pipeline MCP tool
+  `project_git_branch`;
+- answer non-branch questions through the document RAG flow;
+- preserve verified sources and quotes in grounded answers;
+- keep failures readable when Git, Ollama, the index or the generation provider
+  is unavailable.
+
+Use `/mcp index-project-docs PATH` to index only root `README*` files plus
+`docs/` and `project/docs/`. Keep `/mcp index-docs PATH` backward-compatible for
+the broader supported document and source set.
+
+The Git project tool must remain read-only. It may inspect the repository root,
+current branch and detached HEAD state, but must not change branches or modify
+the working tree.
+
+Default `/help QUESTION` generation uses the configured DeepSeek API and may
+send retrieved documentation fragments to that external provider. Fully local
+project-document retrieval and generation belongs to `agent --local-context-chat`.
 
 ## RAG Guidelines
 
