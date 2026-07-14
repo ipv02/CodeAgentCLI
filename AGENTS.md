@@ -190,6 +190,9 @@ the job.
 - cap file count, diff size, indexed files and Evidence size;
 - index project documentation and supported source code into the dedicated
   review index under `~/.code-agent-cli/review/` or `CODE_AGENT_REVIEW_DIR`;
+- keep PR indexing bounded to README/AGENTS/docs plus supported changed files,
+  and batch Ollama embeddings through `/api/embed` instead of issuing one HTTP
+  request per chunk;
 - reject tracked symlinks before indexing so review input cannot escape its
   checkout;
 - retrieve relevant documentation and existing code before generation;

@@ -15,6 +15,7 @@ from code_agent_cli.code_review import (
     PullRequestDiff,
     ReviewFinding,
     ReviewResult,
+    build_review_index_paths,
     build_review_prompt,
     parse_review_response,
     render_review_markdown,
@@ -203,6 +204,25 @@ class CodeReviewTests(unittest.TestCase):
         self.assertIn("return APPROVED", user_prompt)
         self.assertIn("INPUT_DATA_JSON", user_prompt)
 
+    def test_review_index_contains_docs_and_changed_code_only(self) -> None:
+        directory, root, _base, _head = create_repository()
+        self.addCleanup(directory.cleanup)
+        (root / "unchanged.py").write_text("UNCHANGED = True\n", encoding="utf-8")
+
+        selected_paths = build_review_index_paths(
+            root,
+            [
+                ChangedFile(status="M", path="app.py"),
+                ChangedFile(status="A", path="new_module.py"),
+            ],
+        )
+
+        self.assertIn("README.md", selected_paths)
+        self.assertIn("docs/design.md", selected_paths)
+        self.assertIn("app.py", selected_paths)
+        self.assertIn("new_module.py", selected_paths)
+        self.assertNotIn("unchanged.py", selected_paths)
+
     def test_parse_and_render_review_has_required_sections(self) -> None:
         result = parse_review_response(
             """```json
@@ -264,6 +284,10 @@ class CodeReviewTests(unittest.TestCase):
         result = service.run(base, head)
 
         self.assertEqual(index.calls[0][1]["strategies"], ["structural"])
+        selected_paths = index.calls[0][1]["selected_paths"]
+        self.assertIn("README.md", selected_paths)
+        self.assertIn("app.py", selected_paths)
+        self.assertNotIn("unchanged.py", selected_paths)
         self.assertIn("app.py", rag.questions[0])
         self.assertEqual(
             {chunk["source"] for chunk in llm.received_chunks},

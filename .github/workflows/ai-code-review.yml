@@ -78,6 +78,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           CODE_AGENT_REVIEW_DIR: ${{ runner.temp }}/code-agent-review
           CODE_AGENT_REVIEW_MAX_INDEX_FILES: "200"
+          CODE_AGENT_EMBED_BATCH_SIZE: "32"
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_FILE: ${{ runner.temp }}/ai-review.md

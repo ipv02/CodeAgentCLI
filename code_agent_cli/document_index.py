@@ -26,6 +26,8 @@ MAX_CHUNK_SIZE_TOKENS = 1000
 MIN_CHUNK_OVERLAP_TOKENS = 50
 MAX_CHUNK_OVERLAP_TOKENS = 100
 DEFAULT_MAX_FILES = 80
+DEFAULT_EMBED_BATCH_SIZE = 32
+MAX_EMBED_BATCH_SIZE = 128
 PAGE_CHAR_ESTIMATE = 1800
 
 TEXT_EXTENSIONS = {
@@ -132,6 +134,8 @@ class DocumentIndexService:
         overlap: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
         max_files: int = DEFAULT_MAX_FILES,
         project_docs_only: bool = False,
+        selected_paths: list[str] | None = None,
+        embedding_batch_size: int | None = None,
     ) -> dict[str, Any]:
         root = Path(path).expanduser().resolve()
         if not root.exists():
@@ -146,13 +150,21 @@ class DocumentIndexService:
             raise DocumentIndexError("overlap должен быть >= 0 и меньше chunk_size.")
         if max_files < 1:
             raise DocumentIndexError("max_files должен быть положительным числом.")
+        batch_size = normalize_embedding_batch_size(embedding_batch_size)
 
         selected_strategies = normalize_strategies(strategies)
-        documents, skipped = (
-            load_project_documents(root, max_files=max_files)
-            if project_docs_only
-            else load_documents(root, max_files=max_files)
-        )
+        if selected_paths is not None:
+            documents, skipped = load_selected_documents(
+                root,
+                selected_paths=selected_paths,
+                max_files=max_files,
+            )
+        else:
+            documents, skipped = (
+                load_project_documents(root, max_files=max_files)
+                if project_docs_only
+                else load_documents(root, max_files=max_files)
+            )
         if not documents:
             if project_docs_only:
                 raise DocumentIndexError(
@@ -172,8 +184,10 @@ class DocumentIndexService:
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         initialized_at = datetime.now(timezone.utc).isoformat()
         embeddings: list[tuple[DocumentChunk, list[float]]] = []
-        for chunk in chunks:
-            embeddings.append((chunk, self.embed(chunk.text)))
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start : start + batch_size]
+            vectors = self.embed_batch([chunk.text for chunk in batch])
+            embeddings.extend(zip(batch, vectors, strict=True))
 
         save_chunks(
             self.db_path,
@@ -194,6 +208,7 @@ class DocumentIndexService:
             chunk_size=chunk_size,
             overlap=overlap,
         )
+        report["embedding"]["batch_size"] = batch_size
         self.report_path.write_text(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -303,6 +318,57 @@ class DocumentIndexService:
         except (TypeError, ValueError) as error:
             raise DocumentIndexError("Ollama embedding должен быть массивом чисел.") from error
 
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        clean_texts = [text.strip() for text in texts]
+        if not clean_texts or any(not text for text in clean_texts):
+            raise DocumentIndexError("Нельзя создать embedding для пустого чанка.")
+
+        payload = json.dumps(
+            {"model": self.embed_model, "input": clean_texts},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            f"{self.ollama_url}/api/embed",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            if error.code in {404, 405}:
+                return [self.embed(text) for text in clean_texts]
+            body = error.read().decode("utf-8", errors="replace")
+            raise DocumentIndexError(
+                f"Ollama batch embeddings вернул HTTP {error.code}: {body}"
+            ) from error
+        except URLError as error:
+            raise DocumentIndexError(
+                f"Ollama недоступна на {self.ollama_url}. Запустите: ollama serve"
+            ) from error
+        except OSError as error:
+            raise DocumentIndexError(f"Ollama batch embeddings недоступен: {error}") from error
+        except json.JSONDecodeError as error:
+            raise DocumentIndexError(f"Ollama вернула некорректный JSON: {error}") from error
+
+        raw_embeddings = response_payload.get("embeddings")
+        if not isinstance(raw_embeddings, list) or len(raw_embeddings) != len(clean_texts):
+            raise DocumentIndexError(
+                "Ollama batch response содержит неверное количество embeddings."
+            )
+        embeddings: list[list[float]] = []
+        try:
+            for embedding in raw_embeddings:
+                if not isinstance(embedding, list) or not embedding:
+                    raise TypeError
+                embeddings.append([float(value) for value in embedding])
+        except (TypeError, ValueError) as error:
+            raise DocumentIndexError(
+                "Ollama batch embedding должен быть массивом чисел."
+            ) from error
+        return embeddings
+
 
 def normalize_strategies(strategies: list[str] | None) -> list[str]:
     if not strategies:
@@ -315,6 +381,22 @@ def normalize_strategies(strategies: list[str] | None) -> list[str]:
         if clean not in normalized:
             normalized.append(clean)
     return normalized
+
+
+def normalize_embedding_batch_size(value: int | None) -> int:
+    if value is None:
+        raw_value = os.getenv("CODE_AGENT_EMBED_BATCH_SIZE", str(DEFAULT_EMBED_BATCH_SIZE))
+        try:
+            value = int(raw_value)
+        except ValueError as error:
+            raise DocumentIndexError(
+                "CODE_AGENT_EMBED_BATCH_SIZE должен быть целым числом."
+            ) from error
+    if value < 1 or value > MAX_EMBED_BATCH_SIZE:
+        raise DocumentIndexError(
+            f"embedding_batch_size должен быть в диапазоне 1-{MAX_EMBED_BATCH_SIZE}."
+        )
+    return value
 
 
 def load_documents(root: Path, *, max_files: int) -> tuple[list[SourceDocument], list[dict[str, str]]]:
@@ -347,6 +429,42 @@ def load_project_documents(
 
     unique_paths = list(dict.fromkeys(paths))
     return load_document_paths(unique_paths, base=root, max_files=max_files)
+
+
+def load_selected_documents(
+    root: Path,
+    *,
+    selected_paths: list[str],
+    max_files: int,
+) -> tuple[list[SourceDocument], list[dict[str, str]]]:
+    if not root.is_dir():
+        raise DocumentIndexError("Для выборочной индексации укажите корень проекта.")
+
+    paths: list[Path] = []
+    skipped: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    for relative_value in selected_paths:
+        relative_path = Path(relative_value)
+        source = relative_path.as_posix()
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            skipped.append({"source": source, "reason": "путь вне корня проекта"})
+            continue
+        candidate = root / relative_path
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            skipped.append({"source": source, "reason": "файл не найден"})
+            continue
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            skipped.append({"source": source, "reason": "путь вне корня проекта"})
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        paths.append(resolved)
+
+    documents, load_skipped = load_document_paths(paths, base=root, max_files=max_files)
+    return documents, skipped + load_skipped
 
 
 def load_document_paths(

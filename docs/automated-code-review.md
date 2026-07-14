@@ -12,7 +12,7 @@ pull_request
 → отдельный checkout head как недоверенных данных с полной Git-историей
 → changed files + diff base/head
 → Ollama embeddings (`nomic-embed-text`)
-→ RAG по README/docs/AGENTS.md и исходному коду
+→ RAG по README/docs/AGENTS.md и изменённому исходному коду
 → структурированный DeepSeek review
 → проверка JSON
 → обновление комментария Pull Request
@@ -20,6 +20,11 @@ pull_request
 
 Review-комментарий содержит потенциальные баги, архитектурные проблемы,
 рекомендации, сведения о base/head и детерминированный список RAG-источников.
+
+Review-индекс не сканирует весь репозиторий: в него входят README, `AGENTS.md`,
+`docs/`, `project/docs/` и поддерживаемые changed files. Chunks отправляются в
+современный Ollama `/api/embed` пакетами по 32, а для старых версий Ollama
+сохраняется fallback на одиночный `/api/embeddings`.
 
 ## GitHub
 
@@ -60,6 +65,7 @@ agent --review-pr \
   пределами checkout.
 - Diff, комментарии, код и RAG Evidence считаются недоверенными данными.
 - Размер diff, число файлов, индекс и Evidence ограничены.
+- Неизменённые исходники не пересчитываются при каждом PR review.
 - Ответ модели должен соответствовать JSON-схеме; невалидный ответ завершает
   pipeline с понятной ошибкой.
 - Секрет API не выводится и не сохраняется.

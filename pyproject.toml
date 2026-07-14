@@ -16,3 +16,6 @@ scheduler-runner = "code_agent_cli.scheduler_runner:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["code_agent_cli*"]

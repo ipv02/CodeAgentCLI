@@ -11,7 +11,13 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from code_agent_cli.agent import env_float, env_int, https_ssl_context
-from code_agent_cli.document_index import DocumentIndexError, DocumentIndexService
+from code_agent_cli.document_index import (
+    PDF_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    DocumentIndexError,
+    DocumentIndexService,
+    iter_document_paths,
+)
 from code_agent_cli.rag_service import RAGError, RAGService
 
 
@@ -294,6 +300,10 @@ class CodeReviewService:
                     "CODE_AGENT_REVIEW_MAX_INDEX_FILES",
                     DEFAULT_MAX_INDEX_FILES,
                 ),
+                selected_paths=build_review_index_paths(
+                    self.root,
+                    pull_request_diff.changed_files,
+                ),
             )
             retrieval = self.rag_service.search_local(
                 build_retrieval_query(pull_request_diff),
@@ -355,6 +365,30 @@ def validate_review_tree(root: Path) -> None:
             raise CodeReviewError(
                 f"Индексация symlink запрещена для безопасности: {relative_path}"
             )
+
+
+def build_review_index_paths(root: Path, changed_files: list[ChangedFile]) -> list[str]:
+    root = root.resolve()
+    supported_extensions = TEXT_EXTENSIONS | PDF_EXTENSIONS
+    paths: list[Path] = []
+
+    for path in sorted(root.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in supported_extensions:
+            continue
+        if path.name.lower().startswith("readme") or path.name.lower() == "agents.md":
+            paths.append(path)
+
+    for docs_dir in (root / "docs", root / "project" / "docs"):
+        if docs_dir.is_dir():
+            paths.extend(iter_document_paths(docs_dir))
+
+    for changed_file in changed_files:
+        path = root / changed_file.path
+        if path.is_file() and path.suffix.lower() in supported_extensions:
+            paths.append(path)
+
+    unique_paths = dict.fromkeys(path.resolve() for path in paths)
+    return [path.relative_to(root).as_posix() for path in unique_paths]
 
 
 def validate_git_ref(value: str, label: str) -> str:
