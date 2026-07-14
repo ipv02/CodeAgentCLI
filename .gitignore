@@ -23,4 +23,5 @@ htmlcov/
 *.pfx
 secrets.json
 credentials.json
+ai-review.md
 .DS_Store

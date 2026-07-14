@@ -29,6 +29,7 @@ from code_agent_cli.agent import (
     ContextLimitExceededError,
     MissingAPIKeyError,
 )
+from code_agent_cli.code_review import CodeReviewError, CodeReviewService, GitDiffService
 from code_agent_cli.local_llm import (
     DEFAULT_LOCAL_MODEL,
     LocalLLMChatService,
@@ -212,6 +213,11 @@ def main() -> None:
 
     if args.mcp_init_apple:
         if not init_apple_mcp_config(args.mcp_config, args.mcp_force):
+            raise SystemExit(1)
+        return
+
+    if args.review_pr:
+        if not run_code_review_command(args):
             raise SystemExit(1)
         return
 
@@ -417,6 +423,39 @@ def build_parser() -> argparse.ArgumentParser:
             "or --llm-service. Defaults to CODE_AGENT_LOCAL_MODEL or llama3.2:3b."
         ),
     )
+    parser.add_argument(
+        "--review-pr",
+        action="store_true",
+        help="Review changes between --review-base and --review-head with RAG and generate Markdown.",
+    )
+    parser.add_argument(
+        "--review-base",
+        default=os.getenv("CODE_AGENT_REVIEW_BASE", ""),
+        help="Base Git commit/ref for --review-pr.",
+    )
+    parser.add_argument(
+        "--review-head",
+        default=os.getenv("CODE_AGENT_REVIEW_HEAD", "HEAD"),
+        help="Head Git commit/ref for --review-pr. Defaults to HEAD.",
+    )
+    parser.add_argument(
+        "--review-output",
+        type=Path,
+        default=Path(os.getenv("CODE_AGENT_REVIEW_OUTPUT", "ai-review.md")),
+        help="Markdown output path for --review-pr. Defaults to ai-review.md.",
+    )
+    parser.add_argument(
+        "--review-project",
+        type=Path,
+        default=None,
+        help="Project root for --review-pr. Defaults to the detected project root.",
+    )
+    parser.add_argument(
+        "--review-max-diff-chars",
+        type=int,
+        default=env_int("CODE_AGENT_REVIEW_MAX_DIFF_CHARS", 60_000),
+        help="Maximum diff characters sent for review. Defaults to 60000.",
+    )
     return parser
 
 
@@ -433,6 +472,19 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     if args.mcp_timeout <= 0:
         parser.error("--mcp-timeout должен быть положительным числом.")
 
+    if args.review_max_diff_chars < 1:
+        parser.error("--review-max-diff-chars должен быть положительным числом.")
+
+    if args.review_pr:
+        if not args.review_base.strip():
+            parser.error("--review-pr требует --review-base.")
+        if not args.review_head.strip():
+            parser.error("--review-head не должен быть пустым.")
+        if args.prompt:
+            parser.error("--review-pr нельзя совмещать с prompt.")
+        if args.file is not None or args.line_range or args.force_file:
+            parser.error("--review-pr нельзя совмещать с --file, --range или --force-file.")
+
     mcp_mode_enabled = (
         args.mcp_tools is not None
         or args.mcp_config_tools
@@ -444,6 +496,8 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.local_rag_optimize
         or args.llm_service
     )
+    if args.review_pr and (mcp_mode_enabled or local_mode_enabled or args.rag_chat or args.rag_chat_check):
+        parser.error("--review-pr нельзя совмещать с другими режимами агента.")
     if args.local_model and not local_mode_enabled:
         parser.error(
             "--local-model можно использовать только вместе с --local-chat, "
@@ -537,6 +591,47 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 def run_mcp_tools(server_path: Path, timeout: float) -> bool:
     command, args = build_mcp_server_command(server_path)
     return run_mcp_tools_command(command, args, timeout)
+
+
+def run_code_review_command(args: argparse.Namespace) -> bool:
+    if not os.getenv("DEEPSEEK_API_KEY", ""):
+        print(
+            "Ошибка AI code review: DEEPSEEK_API_KEY не задан.",
+            file=sys.stderr,
+        )
+        return False
+    project_root = (
+        args.review_project.expanduser().resolve()
+        if args.review_project is not None
+        else resolve_developer_project_path()
+    )
+    git_service = GitDiffService(
+        project_root,
+        max_diff_chars=args.review_max_diff_chars,
+    )
+    service = CodeReviewService(project_root, git_service=git_service)
+    try:
+        with loader("Анализирую PR diff, документацию и код"):
+            result = service.run(args.review_base, args.review_head)
+        output_path = args.review_output.expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(result.markdown, encoding="utf-8")
+    except (CodeReviewError, OSError) as error:
+        print(f"Ошибка AI code review: {error}", file=sys.stderr)
+        return False
+
+    documents = result.index_report.get("documents")
+    document_count = documents.get("count", 0) if isinstance(documents, dict) else 0
+    print(header_line("AI Code Review"))
+    print(status_line("Project", str(project_root), VALUE))
+    print(status_line("Base", result.pull_request_diff.base_ref, VALUE))
+    print(status_line("Head", result.pull_request_diff.head_ref, VALUE))
+    print(status_line("Changed files", str(len(result.pull_request_diff.changed_files)), SUCCESS))
+    print(status_line("RAG documents", str(document_count), SUCCESS))
+    print(status_line("RAG sources", str(len(result.sources)), SUCCESS))
+    print(status_line("Model", result.model, VALUE))
+    print(status_line("Output", str(output_path), SUCCESS))
+    return True
 
 
 def run_mcp_config_tools(config_path: Path, timeout: float) -> bool:

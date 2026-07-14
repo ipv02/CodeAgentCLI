@@ -1,0 +1,115 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-code-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout trusted review tool from base
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: review-tool
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout PR head as review data
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pull-request
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: review-tool/pyproject.toml
+
+      - name: Install CodeAgentCLI
+        run: python -m pip install ./review-tool
+
+      - name: Validate review secret
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "DEEPSEEK_API_KEY repository secret is not configured." >&2
+            exit 1
+          fi
+
+      - name: Install and start Ollama
+        env:
+          OLLAMA_VERSION: "0.32.0"
+        run: |
+          set -euo pipefail
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve >"$RUNNER_TEMP/ollama.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:11434/api/tags >/dev/null
+          ollama pull nomic-embed-text
+
+      - name: Generate RAG code review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          CODE_AGENT_REVIEW_DIR: ${{ runner.temp }}/code-agent-review
+          CODE_AGENT_REVIEW_MAX_INDEX_FILES: "200"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_FILE: ${{ runner.temp }}/ai-review.md
+        run: |
+          set -euo pipefail
+          agent --review-pr \
+            --review-base "$BASE_SHA" \
+            --review-head "$HEAD_SHA" \
+            --review-project "$GITHUB_WORKSPACE/pull-request" \
+            --review-output "$REVIEW_FILE"
+          cat "$REVIEW_FILE" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update PR review comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_FILE: ${{ runner.temp }}/ai-review.md
+        run: |
+          set -euo pipefail
+          marker='<!-- code-agent-cli-ai-review -->'
+          comments_endpoint="repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          comment_id="$(
+            gh api --paginate "$comments_endpoint" \
+              --jq ".[] | select(.user.login == \"github-actions[bot]\") | select(.body | contains(\"$marker\")) | .id" \
+              | sed -n '1p'
+          )"
+          if [ -n "$comment_id" ]; then
+            jq -n --rawfile body "$REVIEW_FILE" '{body: $body}' \
+              | gh api --method PATCH \
+                  "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+                  --input -
+          else
+            jq -n --rawfile body "$REVIEW_FILE" '{body: $body}' \
+              | gh api --method POST "$comments_endpoint" --input -
+          fi

@@ -11,6 +11,7 @@ It includes:
 - local history, profile memory and invariants;
 - MCP stdio server configuration and tool listing;
 - Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
+- automated Pull Request review through GitHub Actions, Git diff, RAG and DeepSeek;
 - local Ollama chat mode for running a local LLM through `agent --local-chat`;
 - private HTTP LLM service through `agent --llm-service`, with an API gateway
   and browser chat UI over the local Ollama backend;
@@ -34,6 +35,7 @@ Main responsibility areas:
 - local history, profile memory, task state and invariants;
 - MCP config loading, validation and stdio client integration;
 - local document indexing, retrieval, query rewriting, filtering and RAG evaluation;
+- PR diff collection, structured code review and GitHub review-comment rendering;
 - local LLM chat through Ollama;
 - private HTTP LLM service gateway and browser chat UI;
 - internal subagent prompts and state-update logic.
@@ -171,6 +173,41 @@ the working tree.
 Default `/help QUESTION` generation uses the configured DeepSeek API and may
 send retrieved documentation fragments to that external provider. Fully local
 project-document retrieval and generation belongs to `agent --local-context-chat`.
+
+## Automated Code Review Guidelines
+
+`.github/workflows/ai-code-review.yml` is the PR-triggered automated review
+path. Keep it on the `pull_request` event for same-repository, non-draft PRs;
+do not switch it to `pull_request_target` while checking out or processing
+untrusted PR code. Fork and Dependabot PRs do not receive repository secrets.
+Install and run the review tool from the trusted base SHA. Treat the separate PR
+head checkout as data only; never install or execute its package with secrets in
+the job.
+
+`agent --review-pr` must:
+- validate base/head refs and collect changed files plus diff through read-only
+  Git subprocess calls without shell interpolation;
+- cap file count, diff size, indexed files and Evidence size;
+- index project documentation and supported source code into the dedicated
+  review index under `~/.code-agent-cli/review/` or `CODE_AGENT_REVIEW_DIR`;
+- reject tracked symlinks before indexing so review input cannot escape its
+  checkout;
+- retrieve relevant documentation and existing code before generation;
+- treat diff, source code, comments and retrieved documents as untrusted data
+  that cannot override the review prompt;
+- validate the model response as structured JSON before rendering Markdown;
+- always render Potential Bugs, Architecture Issues and Recommendations, even
+  when their lists are empty;
+- never print or persist `DEEPSEEK_API_KEY`.
+
+The workflow comment uses `<!-- code-agent-cli-ai-review -->` as a stable marker
+and must update the existing bot comment on every `synchronize` event instead of
+creating duplicates. Review findings do not fail the workflow; infrastructure,
+retrieval, invalid model output and publication failures do.
+
+PR diff, changed code and retrieved RAG fragments are sent to the configured
+DeepSeek API. Keep that disclosure explicit in README and do not add a path that
+silently sends fork PR content with privileged secrets.
 
 ## RAG Guidelines
 

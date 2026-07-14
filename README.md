@@ -235,6 +235,53 @@ CodeAgentCLI запущена из другого каталога, корень
 Команда `/mcp index-docs PATH` остается доступной для индексации всех
 поддерживаемых документов и исходников по указанному пути.
 
+### Автоматическое AI-ревью Pull Request
+
+Workflow `.github/workflows/ai-code-review.yml` запускается при создании,
+обновлении или повторном открытии PR из ветки этого репозитория. Он:
+
+1. устанавливает доверенную версию ассистента из base SHA, не исполняя код PR;
+2. получает changed files и Git diff между base/head SHA;
+3. поднимает Ollama и индексирует документацию вместе с кодом;
+4. извлекает через RAG связанные документы и существующие реализации;
+5. отправляет ограниченный diff и Evidence в DeepSeek;
+6. создает или обновляет один комментарий в PR.
+
+Комментарий всегда содержит разделы:
+
+```text
+Потенциальные баги
+Архитектурные проблемы
+Рекомендации
+```
+
+Для workflow нужен repository secret `DEEPSEEK_API_KEY`. Права ограничены
+`contents: read` и `pull-requests: write`. Workflow использует безопасное событие
+`pull_request` и не запускает AI-review для fork/Dependabot PR, потому что GitHub
+не передает им repository secrets и выдает read-only `GITHUB_TOKEN`.
+
+Проверить тот же pipeline локально можно командой:
+
+```bash
+ollama serve
+ollama pull nomic-embed-text
+agent --review-pr \
+  --review-base main \
+  --review-head HEAD \
+  --review-output ai-review.md
+```
+
+Отдельный review-индекс хранится в `~/.code-agent-cli/review/` и не заменяет
+обычный индекс Pipeline MCP. Путь можно изменить через
+`CODE_AGENT_REVIEW_DIR`. Лимиты на diff и индекс настраиваются через
+`CODE_AGENT_REVIEW_MAX_DIFF_CHARS` и `CODE_AGENT_REVIEW_MAX_INDEX_FILES`.
+
+Diff, измененный код и найденные RAG-фрагменты считаются недоверенным вводом,
+но передаются внешнему DeepSeek API для генерации ревью. Не включайте в PR
+секреты или данные, которые нельзя отправлять внешнему провайдеру.
+Tracked symlink не индексируются, чтобы PR не мог прочитать файл за пределами
+своего checkout.
+
 ### Локальный чат через Ollama
 
 Для локального чата без внешнего LLM API можно использовать Ollama-модель.
