@@ -37,14 +37,26 @@ Review-индекс не сканирует весь репозиторий: в 
 Пакет `CodeAgentCLI` устанавливается из base SHA. Код из PR checkout не
 исполняется: он используется только как вход для Git diff и локального индекса.
 
+GitHub-hosted runner создаётся заново для каждого запуска. Поэтому Python 3.14,
+CodeAgentCLI и Ollama подготавливаются снова, а `nomic-embed-text` загружается в
+локальное хранилище нового runner. Pip cache включён, но Ollama model storage и
+review-индекс пока не переносятся между workflow runs.
+
 Комментарий помечается `<!-- code-agent-cli-ai-review -->`. При новом commit в
 PR workflow находит этот marker и обновляет существующий комментарий.
 
 ## Локальная проверка
 
+Однократная подготовка embedding-модели, если она ещё не загружена:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+Обычный локальный запуск:
+
 ```bash
 ollama serve
-ollama pull nomic-embed-text
 export DEEPSEEK_API_KEY="ваш_ключ"
 
 agent --review-pr \

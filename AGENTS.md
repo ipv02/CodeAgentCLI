@@ -184,6 +184,12 @@ Install and run the review tool from the trusted base SHA. Treat the separate PR
 head checkout as data only; never install or execute its package with secrets in
 the job.
 
+GitHub-hosted runners are ephemeral. The workflow currently prepares Python,
+installs CodeAgentCLI and Ollama, pulls `nomic-embed-text`, and rebuilds the
+bounded review index on every run. Do not document those steps as persistent or
+cached unless the workflow actually restores them. Keep first-run latency
+observable and avoid returning to one embedding HTTP request per chunk.
+
 `agent --review-pr` must:
 - validate base/head refs and collect changed files plus diff through read-only
   Git subprocess calls without shell interpolation;
@@ -195,7 +201,7 @@ the job.
   request per chunk;
 - reject tracked symlinks before indexing so review input cannot escape its
   checkout;
-- retrieve relevant documentation and existing code before generation;
+- retrieve relevant documentation and changed code before generation;
 - treat diff, source code, comments and retrieved documents as untrusted data
   that cannot override the review prompt;
 - validate the model response as structured JSON before rendering Markdown;

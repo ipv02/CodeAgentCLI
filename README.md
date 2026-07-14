@@ -238,12 +238,13 @@ CodeAgentCLI запущена из другого каталога, корень
 ### Автоматическое AI-ревью Pull Request
 
 Workflow `.github/workflows/ai-code-review.yml` запускается при создании,
-обновлении или повторном открытии PR из ветки этого репозитория. Он:
+обновлении, повторном открытии PR или переводе PR из draft в ready for review.
+Он работает только для веток этого репозитория и:
 
 1. устанавливает доверенную версию ассистента из base SHA, не исполняя код PR;
 2. получает changed files и Git diff между base/head SHA;
 3. поднимает Ollama и индексирует документацию вместе с изменённым кодом;
-4. извлекает через RAG связанные документы и существующие реализации;
+4. извлекает через RAG связанные фрагменты документации и изменённого кода;
 5. отправляет ограниченный diff и Evidence в DeepSeek;
 6. создает или обновляет один комментарий в PR.
 
@@ -258,13 +259,27 @@ Workflow `.github/workflows/ai-code-review.yml` запускается при с
 Для workflow нужен repository secret `DEEPSEEK_API_KEY`. Права ограничены
 `contents: read` и `pull-requests: write`. Workflow использует безопасное событие
 `pull_request` и не запускает AI-review для fork/Dependabot PR, потому что GitHub
-не передает им repository secrets и выдает read-only `GITHUB_TOKEN`.
+не передает им repository secrets и выдает read-only `GITHUB_TOKEN`. Draft PR
+также пропускаются до события `ready_for_review`.
 
-Проверить тот же pipeline локально можно командой:
+Каждый GitHub-hosted запуск получает новый чистый runner. Поэтому workflow
+заново настраивает Python 3.14, устанавливает CodeAgentCLI и Ollama, а также
+выполняет `ollama pull nomic-embed-text`. Python dependencies используют cache,
+но каталог Ollama и review-индекс между запусками сейчас не сохраняются.
+Оптимизированный review ограничивает индекс документацией и changed files и
+создаёт embeddings пакетами, однако подготовка чистого runner всё равно может
+занимать несколько минут.
+
+Если `nomic-embed-text` ещё не загружена локально, это нужно сделать один раз:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+После этого проверить тот же pipeline локально можно командами:
 
 ```bash
 ollama serve
-ollama pull nomic-embed-text
 agent --review-pr \
   --review-base main \
   --review-head HEAD \
