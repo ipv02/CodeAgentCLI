@@ -235,6 +235,63 @@ CodeAgentCLI запущена из другого каталога, корень
 Команда `/mcp index-docs PATH` остается доступной для индексации всех
 поддерживаемых документов и исходников по указанному пути.
 
+### Ассистент поддержки пользователей
+
+Режим поддержки объединяет три вида контекста: текущий вопрос и историю
+обращения, данные пользователя и тикета из read-only MCP-сервера, а также
+найденные фрагменты FAQ продукта.
+
+Для демонстрации проект содержит локальный JSON с обезличенными пользователями
+и тикетами. Проверить MCP-инструменты можно так:
+
+```text
+agent
+/mcp init-support
+/mcp tools
+/mcp call support-data get_ticket_context {"ticket_id": "SUP-1001"}
+```
+
+Запуск ассистента для тикета:
+
+```bash
+agent --support-chat --support-ticket SUP-1001
+```
+
+При первом запуске FAQ индексируется автоматически через локальные Ollama
+embeddings. Индекс поддержки хранится отдельно в
+`~/.code-agent-cli/support/document_index.db` и не заменяет индекс Pipeline MCP.
+Для явного построения или обновления доступны команды:
+
+```bash
+agent --support-index
+agent --support-index --support-index-force
+```
+
+Пример вопроса: `Почему не работает авторизация?`. Ассистент получает через MCP
+код `session_revoked` и состояние аккаунта, находит инструкцию в FAQ и отвечает
+с безопасными шагами, источниками и цитатами. Если подтверждённого фрагмента
+нет, ответ не придумывается: тикет рекомендуется передать второй линии.
+
+Команды режима: `/ticket ID`, `/user`, `/sources`, `/state`,
+`/reset-context`, `/help`, `/exit`. История этого режима хранится отдельно в
+`~/.code-agent-cli/support/history.json`; сырой тикет и найденные фрагменты в
+историю не записываются.
+
+Источники можно заменить без изменения кода:
+
+```bash
+export CODE_AGENT_SUPPORT_DATA_FILE="/path/to/support.json"
+export CODE_AGENT_SUPPORT_DOCS="/path/to/product-faq.md"
+export CODE_AGENT_SUPPORT_DIR="~/.code-agent-cli/support"
+```
+
+При облачной генерации ограниченные фрагменты FAQ и разрешённые поля тикета
+передаются настроенному DeepSeek API. Контактные данные и неизвестные поля JSON
+MCP-сервер не возвращает.
+
+Подробная архитектура и JSON-контракт описаны в
+[`docs/user-support-assistant.md`](docs/user-support-assistant.md).
+
 ### Автоматическое AI-ревью Pull Request
 
 Workflow `.github/workflows/ai-code-review.yml` запускается при создании,

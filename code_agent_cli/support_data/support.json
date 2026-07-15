@@ -1,0 +1,55 @@
+{
+  "users": [
+    {
+      "id": "USR-1001",
+      "plan": "pro",
+      "account_status": "active",
+      "auth_provider": "password",
+      "mfa_enabled": true,
+      "locale": "ru-RU",
+      "last_successful_login_at": "2026-07-14T08:42:00Z"
+    },
+    {
+      "id": "USR-1002",
+      "plan": "free",
+      "account_status": "locked",
+      "auth_provider": "google",
+      "mfa_enabled": false,
+      "locale": "ru-RU",
+      "last_successful_login_at": "2026-07-10T17:20:00Z"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "SUP-1001",
+      "user_id": "USR-1001",
+      "status": "open",
+      "priority": "high",
+      "category": "authentication",
+      "subject": "Не работает авторизация после смены пароля",
+      "description": "После смены пароля вход в браузере возвращает сообщение о недействительной сессии.",
+      "created_at": "2026-07-15T07:15:00Z",
+      "diagnostics": {
+        "error_code": "session_revoked",
+        "failed_attempts": 2,
+        "password_changed_at": "2026-07-15T07:02:00Z",
+        "client": "web"
+      }
+    },
+    {
+      "id": "SUP-1002",
+      "user_id": "USR-1002",
+      "status": "open",
+      "priority": "normal",
+      "category": "authentication",
+      "subject": "Не удаётся войти через Google",
+      "description": "После нескольких попыток входа аккаунт остаётся заблокированным.",
+      "created_at": "2026-07-15T08:10:00Z",
+      "diagnostics": {
+        "error_code": "account_locked",
+        "failed_attempts": 7,
+        "client": "ios"
+      }
+    }
+  ]
+}

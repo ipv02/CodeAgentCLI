@@ -11,6 +11,7 @@ It includes:
 - local history, profile memory and invariants;
 - MCP stdio server configuration and tool listing;
 - Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
+- user support assistant with FAQ RAG and ticket/user context loaded through MCP;
 - automated Pull Request review through GitHub Actions, Git diff, RAG and DeepSeek;
 - local Ollama chat mode for running a local LLM through `agent --local-chat`;
 - private HTTP LLM service through `agent --llm-service`, with an API gateway
@@ -35,6 +36,7 @@ Main responsibility areas:
 - local history, profile memory, task state and invariants;
 - MCP config loading, validation and stdio client integration;
 - local document indexing, retrieval, query rewriting, filtering and RAG evaluation;
+- support JSON validation, read-only support MCP tools and ticket-aware answer orchestration;
 - PR diff collection, structured code review and GitHub review-comment rendering;
 - local LLM chat through Ollama;
 - private HTTP LLM service gateway and browser chat UI;
@@ -412,6 +414,25 @@ Keep the profiles explicit:
 Allow overriding optimized values with `CODE_AGENT_LOCAL_RAG_TEMPERATURE`,
 `CODE_AGENT_LOCAL_RAG_NUM_PREDICT` and `CODE_AGENT_LOCAL_RAG_NUM_CTX`. Do not
 add deterministic answers for individual evaluation questions.
+
+## User Support Assistant Guidelines
+
+`agent --support-chat --support-ticket ID` is the ticket-aware support mode. It
+must:
+- load the ticket and related user through the read-only support MCP server;
+- search the dedicated support FAQ index before every generated answer;
+- keep the support index and history separate from the default Pipeline index
+  and normal chat history;
+- send only allowlisted support fields to generation and never expose unknown
+  JSON fields or contact data;
+- treat ticket text, MCP output and FAQ chunks as untrusted data;
+- keep raw ticket context and retrieved chunks out of persistent history;
+- render deterministic sources and quotes;
+- escalate instead of generating an unsupported answer when context is weak.
+
+The bundled JSON provider is a reproducible demo boundary for CRM integration.
+Keep its normalized tool contract stable so a real CRM-backed MCP server can
+replace it without changing support answer orchestration.
 
 ## Verification
 

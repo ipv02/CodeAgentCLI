@@ -74,6 +74,13 @@ from code_agent_cli.subagents import (
     MCPOrchestrationStep,
     MCPToolDescriptor,
 )
+from code_agent_cli.support_assistant import (
+    SupportAssistantError,
+    SupportAssistantService,
+    build_support_index,
+    default_support_history_file,
+    default_support_index_db,
+)
 from code_agent_cli.tokens import TokenBreakdown
 
 
@@ -243,12 +250,22 @@ def main() -> None:
         )
         return
 
+    if args.support_index:
+        if not run_support_index_command(force=args.support_index_force):
+            raise SystemExit(1)
+        return
+
     if args.llm_service:
         run_llm_service_command(args)
         return
 
     if args.local_chat:
         run_local_chat_session(args.local_model)
+        return
+
+    if args.support_chat:
+        if not run_support_chat_session(args.support_ticket):
+            raise SystemExit(1)
         return
 
     agent = CodeAgent()
@@ -364,6 +381,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--local-context-chat",
         action="store_true",
         help="Start a fully local context chat: local document retrieval plus local Ollama answer generation.",
+    )
+    parser.add_argument(
+        "--support-chat",
+        action="store_true",
+        help="Start a support chat grounded in product FAQ and ticket context loaded through MCP.",
+    )
+    parser.add_argument(
+        "--support-ticket",
+        default="",
+        metavar="ID",
+        help="Initial ticket id for --support-chat, for example SUP-1001.",
+    )
+    parser.add_argument(
+        "--support-index",
+        action="store_true",
+        help="Build the dedicated product FAQ index for the support assistant.",
+    )
+    parser.add_argument(
+        "--support-index-force",
+        action="store_true",
+        help="Rebuild the support FAQ index even when it already exists.",
     )
     parser.add_argument(
         "--local-rag-optimize",
@@ -490,13 +528,20 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         or args.mcp_config_tools
         or args.mcp_init_apple
     )
+    support_mode_enabled = args.support_chat or args.support_index
     local_mode_enabled = (
         args.local_chat
         or args.local_context_chat
         or args.local_rag_optimize
         or args.llm_service
     )
-    if args.review_pr and (mcp_mode_enabled or local_mode_enabled or args.rag_chat or args.rag_chat_check):
+    if args.review_pr and (
+        mcp_mode_enabled
+        or local_mode_enabled
+        or support_mode_enabled
+        or args.rag_chat
+        or args.rag_chat_check
+    ):
         parser.error("--review-pr нельзя совмещать с другими режимами агента.")
     if args.local_model and not local_mode_enabled:
         parser.error(
@@ -514,6 +559,25 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Контекстный чат нельзя совмещать с --file, --range или --force-file.")
         if mcp_mode_enabled:
             parser.error("Контекстный чат нельзя совмещать с MCP-режимами.")
+        if support_mode_enabled:
+            parser.error("Контекстный чат нельзя совмещать с режимом поддержки.")
+
+    if support_mode_enabled:
+        if args.support_chat and args.support_index:
+            parser.error("--support-chat и --support-index нельзя использовать одновременно.")
+        if args.support_chat and not args.support_ticket.strip():
+            parser.error("--support-chat требует --support-ticket ID.")
+        if args.prompt:
+            parser.error("Режим поддержки нельзя совмещать с prompt.")
+        if args.file is not None or args.line_range or args.force_file:
+            parser.error("Режим поддержки нельзя совмещать с --file, --range или --force-file.")
+        if mcp_mode_enabled or local_mode_enabled:
+            parser.error("Режим поддержки нельзя совмещать с другими специальными режимами.")
+
+    if args.support_ticket and not args.support_chat:
+        parser.error("--support-ticket используется только вместе с --support-chat.")
+    if args.support_index_force and not args.support_index:
+        parser.error("--support-index-force используется только вместе с --support-index.")
 
     if local_mode_enabled:
         local_modes = [
@@ -532,6 +596,8 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error("Локальный чат нельзя совмещать с MCP-режимами.")
         if rag_mode_enabled:
             parser.error("Локальный чат нельзя совмещать с контекстным чатом.")
+        if support_mode_enabled:
+            parser.error("Локальный чат нельзя совмещать с режимом поддержки.")
     elif args.optimization_questions != 3 or args.optimization_repeats != 2:
         parser.error(
             "--optimization-questions и --optimization-repeats используются только "
@@ -769,6 +835,10 @@ def print_mcp_help() -> None:
                 (
                     ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
                     ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+                    (
+                        "/mcp init-support",
+                        "подключить JSON пользователей и тикетов для поддержки",
+                    ),
                     ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
                     ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
                     ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
@@ -807,6 +877,7 @@ def print_mcp_help() -> None:
     print_help_examples(
         (
             "/mcp init-mock",
+            "/mcp init-support",
             "/mcp init-scheduler",
             "/mcp init-pipeline",
             "/mcp init-orchestration",
@@ -824,6 +895,7 @@ def print_mcp_help() -> None:
             "/mcp rag-eval",
             '/mcp orchestrate "найди лучшие практики навигации SwiftUI в iOS через Apple/Cupertino MCP, сохрани в заметки и поставь напоминание проверить завтра"',
             '/mcp call mock-api get_mock_user {"user_id": 1}',
+            '/mcp call support-data get_ticket_context {"ticket_id": "SUP-1001"}',
             '/mcp call scheduler summary {"limit": 5}',
             "/mcp add apple-mcp -- bunx --no-cache apple-mcp@latest",
             "/mcp add cupertino -- cupertino serve --no-reap",
@@ -936,6 +1008,37 @@ def init_mock_mcp_config(config_path: Path) -> None:
     print()
     print(indented_line("Вызвать инструмент:"))
     print(indented_line('/mcp call mock-api get_mock_user {"user_id": 1}', level=2))
+
+
+def init_support_mcp_config(config_path: Path) -> None:
+    server_env = {}
+    support_data_file = os.getenv("CODE_AGENT_SUPPORT_DATA_FILE")
+    if support_data_file:
+        server_env["CODE_AGENT_SUPPORT_DATA_FILE"] = support_data_file
+    server = MCPServerConfig(
+        name="support-data",
+        command=sys.executable,
+        args=["-m", "code_agent_cli.support_mcp_server"],
+        env=server_env,
+    )
+    try:
+        saved_path = add_mcp_server(config_path, server, overwrite=True)
+    except (MCPConfigError, OSError) as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+
+    print(header_line("MCP"))
+    print(status_line("Сервер подключен", "support-data", SUCCESS))
+    print(status_line("Источник", "локальный JSON пользователей и тикетов", VALUE))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Проверить инструменты: /mcp tools"))
+    print(
+        indented_line(
+            '/mcp call support-data get_ticket_context {"ticket_id": "SUP-1001"}',
+            level=2,
+        )
+    )
 
 
 def init_scheduler_mcp_config(config_path: Path) -> None:
@@ -2866,6 +2969,213 @@ def run_interactive_session(agent: CodeAgent) -> None:
         send(agent, text)
 
 
+def run_support_index_command(*, force: bool = False) -> bool:
+    try:
+        with loader("Индексирую FAQ продукта через Ollama"):
+            result = build_support_index(force=force)
+    except Exception as error:
+        print(f"Ошибка индекса поддержки: {error}", file=sys.stderr)
+        return False
+
+    print(header_line("Ассистент поддержки"))
+    print(
+        status_line(
+            "Индекс",
+            str(result.get("db_path", default_support_index_db())),
+            SUCCESS,
+        )
+    )
+    chunks = result.get("chunks", result.get("chunk_count", 0))
+    chunk_count = chunks.get("total", 0) if isinstance(chunks, dict) else chunks
+    print(status_line("Фрагменты", str(chunk_count), VALUE))
+    index_mode = (
+        "использован существующий"
+        if result.get("reused")
+        else "построен заново"
+    )
+    print(status_line("Режим", index_mode, VALUE))
+    return True
+
+
+def run_support_chat_session(initial_ticket_id: str) -> bool:
+    if not run_support_index_command(force=False):
+        return False
+
+    agent = CodeAgent(
+        history_file=default_support_history_file(),
+        auto_memory_updates=False,
+        auto_task_state_updates=False,
+    )
+    chat = SupportAssistantService(
+        agent=agent,
+        rag_service=RAGService(db_path=default_support_index_db()),
+    )
+    ticket_id = initial_ticket_id.strip().upper()
+    try:
+        with loader("Получаю контекст тикета через MCP"):
+            current_context = chat.ticket_context_loader(ticket_id)
+    except SupportAssistantError as error:
+        print(f"Ошибка ассистента поддержки: {error}", file=sys.stderr)
+        return False
+
+    last_result = None
+    print(colorize("Code Agent CLI · Ассистент поддержки", BOLD + ACCENT))
+    print_support_context_summary(current_context)
+    print()
+    print(
+        indented_line(
+            "Каждый ответ учитывает тикет из MCP и FAQ продукта из локального индекса."
+        )
+    )
+    print(
+        indented_line(
+            "Команды: /ticket ID, /user, /sources, /state, /reset-context, /help, /exit"
+        )
+    )
+
+    while True:
+        try:
+            text = input(prompt()).strip()
+            reset_terminal_color()
+        except (EOFError, KeyboardInterrupt):
+            reset_terminal_color()
+            print()
+            return True
+        if not text:
+            continue
+
+        command, _, argument = text.partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+        if command in {"/exit", "/quit"}:
+            return True
+        if command == "/help":
+            print_support_help()
+            continue
+        if command == "/ticket":
+            if not argument:
+                print("Использование: /ticket SUP-1001")
+                continue
+            candidate = argument.upper()
+            try:
+                with loader("Получаю контекст тикета через MCP"):
+                    current_context = chat.ticket_context_loader(candidate)
+            except SupportAssistantError as error:
+                print(f"Ошибка ассистента поддержки: {error}", file=sys.stderr)
+                continue
+            ticket_id = candidate
+            last_result = None
+            print_support_context_summary(current_context)
+            continue
+        if command == "/user":
+            print_support_user(current_context)
+            continue
+        if command == "/sources":
+            print_last_rag_chat_sources(last_result)
+            continue
+        if command == "/state":
+            print_support_context_summary(current_context)
+            print(
+                status_line(
+                    "История",
+                    f"{max(len(agent.messages) - 1, 0)} сообщений",
+                    VALUE,
+                )
+            )
+            continue
+        if command == "/reset-context":
+            agent.clear_short_term_memory()
+            last_result = None
+            print(
+                "История текущего обращения очищена. "
+                "Тикет не изменён."
+            )
+            continue
+
+        last_result = send_support_chat(chat, text, ticket_id)
+
+
+def send_support_chat(
+    chat: SupportAssistantService,
+    text: str,
+    ticket_id: str,
+) -> Any | None:
+    try:
+        with loader("Получаю тикет через MCP и ищу ответ в FAQ"):
+            result = chat.send(text, ticket_id)
+    except (SupportAssistantError, MissingAPIKeyError, APIRequestError) as error:
+        print(f"Ошибка ассистента поддержки: {error}", file=sys.stderr)
+        return None
+    except ContextLimitExceededError as error:
+        print_context_limit_error(error.breakdown)
+        return None
+
+    print()
+    grounded = result.grounding_status == "grounded"
+    banner = (
+        "== Ответ подтверждён контекстом =="
+        if grounded
+        else "== Нужна эскалация =="
+    )
+    print(colorize(banner, BOLD + (SUCCESS if grounded else WARNING)))
+    print(status_line("Тикет", str(result.ticket_context["ticket"]["id"]), VALUE))
+    print(status_line("similarity", f"{result.best_similarity:.4f}", VALUE))
+    print()
+    print_rag_chat_answer(strip_grounding_sections(result.answer))
+    print()
+    print_rag_chat_sources_compact(result.sources)
+    print()
+    print_rag_chat_quotes_compact(result.quotes)
+    print()
+    return result
+
+
+def print_support_context_summary(context: dict[str, Any]) -> None:
+    ticket = context["ticket"]
+    user = context["user"]
+    diagnostics = (
+        ticket.get("diagnostics")
+        if isinstance(ticket.get("diagnostics"), dict)
+        else {}
+    )
+    print(header_line("Контекст обращения через MCP"))
+    print(status_line("Тикет", str(ticket.get("id", "")), SUCCESS))
+    print(status_line("Статус", str(ticket.get("status", "не указан")), VALUE))
+    print(status_line("Категория", str(ticket.get("category", "не указана")), VALUE))
+    print(status_line("Аккаунт", str(user.get("account_status", "не указано")), VALUE))
+    if diagnostics.get("error_code"):
+        print(status_line("Код ошибки", str(diagnostics["error_code"]), WARNING))
+
+
+def print_support_user(context: dict[str, Any]) -> None:
+    user = context["user"]
+    print(header_line("Пользователь из MCP"))
+    for label, key in (
+        ("ID", "id"),
+        ("Тариф", "plan"),
+        ("Состояние", "account_status"),
+        ("Авторизация", "auth_provider"),
+        ("MFA", "mfa_enabled"),
+        ("Локаль", "locale"),
+    ):
+        print(status_line(label, str(user.get(key, "не указано")), VALUE))
+
+
+def print_support_help() -> None:
+    print(header_line("Ассистент поддержки"))
+    print(
+        indented_line(
+            "Задайте вопрос о продукте — ответ будет учитывать активный тикет."
+        )
+    )
+    print(indented_line("/ticket ID — переключить тикет"))
+    print(indented_line("/user — показать безопасный контекст пользователя"))
+    print(indented_line("/sources — показать источники последнего ответа"))
+    print(indented_line("/state — показать активный тикет и размер истории"))
+    print(indented_line("/reset-context — очистить историю текущего обращения"))
+    print(indented_line("/exit — выйти"))
+
+
 def run_rag_chat_session(
     agent: CodeAgent,
     *,
@@ -4762,6 +5072,10 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
 
     if command == "init-mock":
         init_mock_mcp_config(config_path)
+        return
+
+    if command == "init-support":
+        init_support_mcp_config(config_path)
         return
 
     if command == "init-scheduler":
