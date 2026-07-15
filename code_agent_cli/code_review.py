@@ -27,6 +27,7 @@ DEFAULT_MAX_CHANGED_FILES = 120
 DEFAULT_MAX_INDEX_FILES = 200
 DEFAULT_RETRIEVAL_TOP_K = 8
 DEFAULT_RETRIEVAL_CANDIDATE_K = 16
+MAX_RETRIEVAL_QUERY_CHARS = 1_800
 DEFAULT_EVIDENCE_CHARS = 18_000
 SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@{}+^~:-]{0,199}$")
 SEVERITIES = {"critical", "high", "medium", "low", "info"}
@@ -438,19 +439,27 @@ def truncate_text(text: str, max_chars: int) -> str:
 
 
 def build_retrieval_query(pull_request_diff: PullRequestDiff) -> str:
+    header = "Code review architecture documentation related code changed files\n"
     paths = "\n".join(file.path for file in pull_request_diff.changed_files)
-    relevant_lines = []
+    paths_marker = "\n[CHANGED FILES TRUNCATED]\n"
+    paths_budget = 600
+    paths_block = (
+        paths
+        if len(paths) <= paths_budget
+        else paths[: paths_budget - len(paths_marker)].rstrip() + paths_marker
+    )
+    prefix = f"{header}Changed files:\n{paths_block}\n\nChanged diff terms:\n"
+    remaining_chars = max(MAX_RETRIEVAL_QUERY_CHARS - len(prefix), 0)
+    relevant_lines: list[str] = []
+    relevant_chars = 0
     for line in pull_request_diff.diff.splitlines():
         if line.startswith(("+++ ", "--- ", "@@", "+", "-")):
+            line_cost = len(line) + (1 if relevant_lines else 0)
+            if relevant_chars + line_cost > remaining_chars:
+                break
             relevant_lines.append(line)
-        if sum(len(item) for item in relevant_lines) >= 4_000:
-            break
-    return (
-        "Code review architecture documentation related code changed files\n"
-        f"Changed files:\n{paths}\n\n"
-        "Changed diff terms:\n"
-        + "\n".join(relevant_lines)
-    )[:6_000]
+            relevant_chars += line_cost
+    return (prefix + "\n".join(relevant_lines))[:MAX_RETRIEVAL_QUERY_CHARS]
 
 
 def build_review_prompt(

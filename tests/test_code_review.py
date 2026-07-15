@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from code_agent_cli.code_review import (
+    MAX_RETRIEVAL_QUERY_CHARS,
     REVIEW_COMMENT_MARKER,
     ChangedFile,
     CodeReviewError,
@@ -17,6 +18,7 @@ from code_agent_cli.code_review import (
     ReviewResult,
     build_review_index_paths,
     build_review_prompt,
+    build_retrieval_query,
     parse_review_response,
     render_review_markdown,
     validate_review_tree,
@@ -149,6 +151,29 @@ class CodeReviewTests(unittest.TestCase):
         self.assertTrue(result.diff_truncated)
         self.assertIn("DIFF TRUNCATED BY CODEAGENTCLI", result.diff)
         self.assertGreaterEqual(len(result.changed_files), 3)
+
+    def test_retrieval_query_is_bounded_for_large_multilingual_diff(self) -> None:
+        changed_files = [
+            ChangedFile(status="M", path=f"code_agent_cli/module_{index}.py")
+            for index in range(40)
+        ]
+        large_diff = "\n".join(
+            f"+Сообщение об ошибке авторизации номер {index}: session_revoked"
+            for index in range(500)
+        )
+        pull_request_diff = PullRequestDiff(
+            base_ref="main",
+            head_ref="feature",
+            merge_base="base",
+            changed_files=changed_files,
+            diff=large_diff,
+        )
+
+        query = build_retrieval_query(pull_request_diff)
+
+        self.assertLessEqual(len(query), MAX_RETRIEVAL_QUERY_CHARS)
+        self.assertIn("code_agent_cli/module_0.py", query)
+        self.assertIn("Changed diff terms:", query)
 
     def test_git_refs_reject_option_injection(self) -> None:
         directory, root, _base, head = create_repository()
