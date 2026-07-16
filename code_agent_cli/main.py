@@ -64,6 +64,13 @@ from code_agent_cli.mcp_client import (
     call_mcp_tool,
     list_mcp_tools,
 )
+from code_agent_cli.project_file_assistant import (
+    ProjectFileAssistantError,
+    ProjectFileAssistantResult,
+    ProjectFileAssistantService,
+    is_project_file_goal,
+)
+from code_agent_cli.project_files import ProjectFileChange
 from code_agent_cli.rag_chat import (
     RAGChatService,
     run_rag_chat_production_check,
@@ -105,6 +112,10 @@ CODE_TEXT = "\033[38;5;253m"
 CODE_STRING = "\033[38;5;180m"
 CODE_NUMBER = "\033[38;5;149m"
 CODE_KEYWORD = "\033[38;5;141m"
+DIFF_ADDED = SUCCESS
+DIFF_REMOVED = ERROR
+DIFF_CONTEXT = MUTED
+DIFF_HUNK = ACCENT_SOFT
 DEFAULT_MAX_FILE_BYTES = 120 * 1024
 DEFAULT_WRAP_WIDTH = 96
 MIN_WRAP_WIDTH = 56
@@ -276,6 +287,14 @@ def main() -> None:
 
     if args.prompt:
         prompt = build_prompt(args)
+        request_text = normalize_prompt(prompt).request_text
+        if is_project_file_goal(request_text):
+            if not run_project_file_goal(agent, request_text, apply=args.apply):
+                raise SystemExit(1)
+            return
+        if args.apply:
+            print("Ошибка: --apply используется только для файловой задачи.", file=sys.stderr)
+            raise SystemExit(1)
         if not send(agent, prompt):
             raise SystemExit(1)
         return
@@ -314,6 +333,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-file",
         action="store_true",
         help="Send a large attached file without asking for confirmation.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply a project-file change; without it the agent prints a diff.",
     )
     parser.add_argument(
         "--mcp-tools",
@@ -503,6 +527,11 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
     if args.force_file and args.file is None:
         parser.error("--force-file можно использовать только вместе с --file.")
+
+    if args.apply and not args.prompt:
+        parser.error("--apply требует файловую задачу в prompt.")
+    if args.apply and args.file is not None:
+        parser.error("--apply нельзя совмещать с --file.")
 
     if args.max_file_bytes < 1:
         parser.error("--max-file-bytes должен быть положительным числом.")
@@ -839,6 +868,10 @@ def print_mcp_help() -> None:
                         "/mcp init-support",
                         "подключить JSON пользователей и тикетов для поддержки",
                     ),
+                    (
+                        "/mcp init-project-files",
+                        "подключить безопасные tools файлов проекта",
+                    ),
                     ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
                     ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
                     ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
@@ -878,6 +911,7 @@ def print_mcp_help() -> None:
         (
             "/mcp init-mock",
             "/mcp init-support",
+            "/mcp init-project-files",
             "/mcp init-scheduler",
             "/mcp init-pipeline",
             "/mcp init-orchestration",
@@ -1039,6 +1073,27 @@ def init_support_mcp_config(config_path: Path) -> None:
             level=2,
         )
     )
+
+
+def init_project_files_mcp_config(config_path: Path) -> None:
+    project_root = resolve_developer_project_path()
+    server = MCPServerConfig(
+        name="project-files",
+        command=sys.executable,
+        args=["-m", "code_agent_cli.project_files_mcp_server"],
+        env={"CODE_AGENT_PROJECT_FILES_ROOT": str(project_root)},
+    )
+    try:
+        saved_path = add_mcp_server(config_path, server, overwrite=True)
+    except (MCPConfigError, OSError) as error:
+        print(f"Ошибка MCP config: {error}", file=sys.stderr)
+        return
+    print(header_line("MCP"))
+    print(status_line("Сервер подключен", "project-files", SUCCESS))
+    print(status_line("Корень проекта", str(project_root), VALUE))
+    print(status_line("Конфиг", str(saved_path), VALUE))
+    print()
+    print(indented_line("Проверить инструменты: /mcp tools"))
 
 
 def init_scheduler_mcp_config(config_path: Path) -> None:
@@ -2888,9 +2943,214 @@ def run_developer_help(question: str, project_path: Path) -> None:
     print_rag_answer_result(rag_payload)
 
 
+def run_project_file_goal(agent: CodeAgent, goal: str, *, apply: bool) -> bool:
+    service = ProjectFileAssistantService(
+        resolve_developer_project_path(),
+        agent=agent,
+    )
+    return run_project_file_goal_with_service(service, goal, apply=apply) is not None
+
+
+def run_project_file_goal_with_service(
+    service: ProjectFileAssistantService,
+    goal: str,
+    *,
+    apply: bool,
+) -> ProjectFileAssistantResult | None:
+    try:
+        with loader("Анализирую файлы проекта через MCP"):
+            result = service.run(goal, apply=apply)
+    except (ProjectFileAssistantError, ProjectFileError) as error:
+        print(f"Ошибка файлового ассистента: {error}", file=sys.stderr)
+        return None
+    except (MissingAPIKeyError, APIRequestError) as error:
+        print(f"Ошибка файлового ассистента: {error}", file=sys.stderr)
+        return None
+    except ContextLimitExceededError as error:
+        print_context_limit_error(error.breakdown)
+        return None
+    print_project_file_result(result)
+    return result
+
+
+def print_project_file_result(result: ProjectFileAssistantResult) -> None:
+    print()
+    print(header_line("Файловый ассистент"))
+    print(status_line("Цель", result.goal, VALUE))
+    print(status_line("Сценарий", result.intent, SUCCESS))
+    print(status_line("Файлов проанализировано", str(len(result.analyzed_files)), VALUE))
+    for path in result.analyzed_files[:20]:
+        print(indented_line(path, level=2))
+    if result.matches:
+        print()
+        print(subheader_line("Найденные места"))
+        for match in result.matches[:50]:
+            print(
+                indented_line(
+                    f"{match.get('path')}:{match.get('line')}  {match.get('text', '')}"
+                )
+            )
+    for change in result.changes:
+        print()
+        print(subheader_line(f"Diff: {change.path}"))
+        print(render_project_file_diff(change))
+    if result.changes and not result.applied:
+        print(
+            indented_line(
+                "Изменения не записаны. В чате: /files apply; "
+                "one-shot: повторите цель с agent --apply.",
+                level=1,
+            )
+        )
+    if result.applied:
+        print(status_line("Запись", "изменения применены", SUCCESS))
+    print(indented_line(result.summary))
+    print()
+
+
+def handle_files_command(
+    service: ProjectFileAssistantService,
+    pending: list[ProjectFileChange],
+    argument: str,
+) -> list[ProjectFileChange]:
+    command = argument.strip().lower()
+    if command in {"", "help"}:
+        print(header_line("Файлы проекта"))
+        print(indented_line("Задайте цель обычным сообщением: найти использование, обновить документацию или создать файл."))
+        print(indented_line("/files diff — показать изменение в человекочитаемом виде"))
+        print(indented_line("/files raw-diff — показать технический unified diff"))
+        print(indented_line("/files apply — применить подготовленные изменения"))
+        print(indented_line("/files cancel — отменить подготовленные изменения"))
+        return pending
+    if command == "diff":
+        if not pending:
+            print("Нет подготовленных файловых изменений.")
+            return pending
+        for change in pending:
+            print(render_project_file_diff(change))
+        return pending
+    if command == "raw-diff":
+        if not pending:
+            print("Нет подготовленных файловых изменений.")
+            return pending
+        for change in pending:
+            print(render_raw_project_file_diff(change))
+        return pending
+    if command == "cancel":
+        print("Подготовленные файловые изменения отменены.")
+        return []
+    if command == "apply":
+        if not pending:
+            print("Нет подготовленных файловых изменений.")
+            return pending
+        try:
+            with loader("Применяю проверенный diff"):
+                results = service.apply_changes(pending)
+        except (ProjectFileAssistantError, ProjectFileError) as error:
+            print(f"Ошибка файлового ассистента: {error}", file=sys.stderr)
+            return pending
+        applied = sum(1 for item in results if item.get("applied"))
+        print(status_line("Файлы", f"применено {applied}/{len(results)}", SUCCESS))
+        return []
+    print(
+        "Использование: /files | /files diff | /files raw-diff | "
+        "/files apply | /files cancel"
+    )
+    return pending
+
+
+def render_project_file_diff(
+    change: ProjectFileChange,
+    *,
+    max_chars: int = 24_000,
+) -> str:
+    if not change.diff:
+        return f"Файл {change.path}: изменений нет."
+    if not change.expected_sha256:
+        return limit_project_file_output(
+            render_new_project_file(change),
+            max_chars=max_chars,
+        )
+
+    title = f"Изменение файла: {change.path}"
+    lines = [colorize(title, BOLD + ACCENT) if use_color() else title]
+    for line in change.diff.splitlines():
+        if line.startswith(("--- ", "+++ ")):
+            continue
+        if line.startswith("@@"):
+            label = human_diff_hunk_label(line)
+            lines.extend(("", colorize(label, DIFF_HUNK + BOLD)))
+        elif line.startswith("+"):
+            prefix = colorize(" + Добавлено │", DIFF_ADDED + BOLD)
+            lines.append(f"{prefix} {colorize(line[1:], ANSWER_TEXT)}")
+        elif line.startswith("-"):
+            prefix = colorize(" − Удалено  │", DIFF_REMOVED + BOLD)
+            lines.append(f"{prefix} {colorize(line[1:], ANSWER_TEXT)}")
+        elif line.startswith(" "):
+            prefix = colorize("   Контекст │", DIFF_CONTEXT)
+            lines.append(f"{prefix} {colorize(line[1:], ANSWER_TEXT)}")
+        else:
+            lines.append(line)
+    return limit_project_file_output("\n".join(lines), max_chars=max_chars)
+
+
+def render_new_project_file(change: ProjectFileChange) -> str:
+    title = f"Новый файл: {change.path}"
+    if not use_color():
+        return f"{title}\n\n{change.content}"
+
+    content_lines = change.content.splitlines()
+    line_number_width = max(1, len(str(len(content_lines))))
+    rendered_lines = [colorize(title, BOLD + SUCCESS), ""]
+    for line_number, line in enumerate(content_lines, start=1):
+        gutter = colorize(
+            f" + {line_number:>{line_number_width}} │",
+            DIFF_ADDED + BOLD,
+        )
+        rendered_lines.append(f"{gutter} {colorize(line, ANSWER_TEXT)}")
+    return "\n".join(rendered_lines)
+
+
+def render_raw_project_file_diff(
+    change: ProjectFileChange,
+    *,
+    max_chars: int = 24_000,
+) -> str:
+    diff = change.diff or "Изменений нет."
+    return limit_project_file_output(diff, max_chars=max_chars)
+
+
+def limit_project_file_output(value: str, *, max_chars: int) -> str:
+    visible_value = strip_ansi(value)
+    if len(visible_value) <= max_chars:
+        return value
+    omitted = len(visible_value) - max_chars
+    return (
+        truncate_ansi(value, max_chars)
+        + f"\n\n... вывод сокращён на {omitted} символов. "
+        + "Перед применением сузьте цель или проверьте целевой файл."
+    )
+
+
+def human_diff_hunk_label(header: str) -> str:
+    match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", header)
+    if match is None:
+        return "Изменённый фрагмент:"
+    start = int(match.group(1))
+    count = int(match.group(2) or "1")
+    if count == 0:
+        return f"Фрагмент около строки {start}:"
+    end = start + count - 1
+    if start == end:
+        return f"Строка {start}:"
+    return f"Строки {start}–{end}:"
+
+
 def run_interactive_session(agent: CodeAgent) -> None:
     print(colorize("Code Agent CLI", BOLD + ACCENT))
     print_startup_summary(agent)
+    project_files: ProjectFileAssistantService | None = None
+    pending_file_changes: list[ProjectFileChange] = []
 
     while True:
         try:
@@ -2963,7 +3223,30 @@ def run_interactive_session(agent: CodeAgent) -> None:
             handle_mcp_command(agent, argument)
             continue
 
+        if command == "/files":
+            if project_files is None:
+                project_files = ProjectFileAssistantService(
+                    resolve_developer_project_path(),
+                    agent=agent,
+                )
+            pending_file_changes = handle_files_command(
+                project_files,
+                pending_file_changes,
+                argument,
+            )
+            continue
+
         if warn_bare_scheduler_tool(text):
+            continue
+
+        if is_project_file_goal(text):
+            if project_files is None:
+                project_files = ProjectFileAssistantService(
+                    resolve_developer_project_path(),
+                    agent=agent,
+                )
+            result = run_project_file_goal_with_service(project_files, text, apply=False)
+            pending_file_changes = result.changes if result is not None else []
             continue
 
         send(agent, text)
@@ -4237,6 +4520,18 @@ def print_help() -> None:
         )
     )
     print()
+    print_command_help_section(
+        "Файлы проекта",
+        (
+            ("обычная цель", "автоматически найти, проанализировать или подготовить изменение файлов"),
+            ("/files diff", "показать подготовленное изменение в читаемом виде"),
+            ("/files raw-diff", "показать технический unified diff"),
+            ("/files apply", "применить подготовленные изменения с SHA-проверкой"),
+            ("/files cancel", "отменить подготовленные изменения"),
+            ("agent --apply GOAL", "проанализировать и применить файловую задачу в one-shot режиме"),
+        ),
+    )
+    print()
     print_command_help_grouped_section(
         "MCP",
         (
@@ -4261,6 +4556,7 @@ def print_help() -> None:
                 (
                     ("/mcp init-apple", "создать config для apple-mcp и cupertino"),
                     ("/mcp init-mock", "подключить встроенный mock HTTP API MCP-сервер"),
+                    ("/mcp init-project-files", "подключить безопасные tools файлов проекта"),
                     ("/mcp init-scheduler", "подключить встроенный SQLite MCP-планировщик"),
                     ("/mcp init-pipeline", "подключить web+LLM MCP pipeline"),
                     ("/mcp init-orchestration", "подключить apple-mcp, cupertino, pipeline и scheduler"),
@@ -5078,6 +5374,10 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
         init_support_mcp_config(config_path)
         return
 
+    if command == "init-project-files":
+        init_project_files_mcp_config(config_path)
+        return
+
     if command == "init-scheduler":
         init_scheduler_mcp_config(config_path)
         return
@@ -5090,7 +5390,7 @@ def handle_mcp_command(agent: CodeAgent, argument: str) -> None:
         init_orchestration_mcp_config(config_path)
         return
 
-    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-project-docs PATH | /mcp index-status | /mcp git-branch [PATH] | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-answer-local QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
+    print("Использование: /mcp | /mcp add NAME -- COMMAND ARGS | /mcp remove NAME | /mcp clear | /mcp tools | /mcp remind TEXT AT | /mcp run_due | /mcp summary | /mcp clear-scheduler | /mcp pipeline QUERY FILE | /mcp index-docs PATH | /mcp index-project-docs PATH | /mcp index-status | /mcp git-branch [PATH] | /mcp compare-chunking | /mcp rag-search QUESTION | /mcp rag-answer QUESTION | /mcp rag-answer-local QUESTION | /mcp rag-compare QUESTION | /mcp rag-eval | /mcp orchestrate TEXT | /mcp call SERVER TOOL JSON | /mcp init-mock | /mcp init-project-files | /mcp init-scheduler | /mcp init-pipeline | /mcp init-orchestration | /mcp show | /mcp test | /mcp help")
 
 
 def print_branch_report(agent: CodeAgent) -> None:

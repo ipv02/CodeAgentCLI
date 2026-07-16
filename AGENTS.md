@@ -12,6 +12,7 @@ It includes:
 - MCP stdio server configuration and tool listing;
 - Pipeline MCP with local document indexing and RAG over SQLite/Ollama embeddings;
 - user support assistant with FAQ RAG and ticket/user context loaded through MCP;
+- goal-level project file assistant with safe read/search/diff/apply MCP tools;
 - automated Pull Request review through GitHub Actions, Git diff, RAG and DeepSeek;
 - local Ollama chat mode for running a local LLM through `agent --local-chat`;
 - private HTTP LLM service through `agent --llm-service`, with an API gateway
@@ -37,6 +38,7 @@ Main responsibility areas:
 - MCP config loading, validation and stdio client integration;
 - local document indexing, retrieval, query rewriting, filtering and RAG evaluation;
 - support JSON validation, read-only support MCP tools and ticket-aware answer orchestration;
+- project-scoped file validation, optimistic writes and goal-level file orchestration;
 - PR diff collection, structured code review and GitHub review-comment rendering;
 - local LLM chat through Ollama;
 - private HTTP LLM service gateway and browser chat UI;
@@ -433,6 +435,23 @@ must:
 The bundled JSON provider is a reproducible demo boundary for CRM integration.
 Keep its normalized tool contract stable so a real CRM-backed MCP server can
 replace it without changing support answer orchestration.
+
+## Project File Assistant Guidelines
+
+The project file assistant is integrated into normal `agent` requests. Keep
+ordinary questions on the standard response path and route explicit file goals
+through the project-files service.
+
+File operations must:
+- stay inside the resolved project root and reject traversal and symlinks;
+- exclude Git internals, environments, generated dependency trees, secrets and
+  persistent CodeAgentCLI state;
+- search and read automatically, but show a diff before mutation;
+- require `/files apply` or explicit `--apply` for writes;
+- check the previously read SHA before atomically replacing a file;
+- treat file content and generated output as untrusted data;
+- never execute project files or interpolate their content into shell commands;
+- keep repeated application idempotent where content is unchanged.
 
 ## Verification
 
