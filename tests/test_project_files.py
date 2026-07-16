@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -9,11 +12,16 @@ from unittest.mock import patch
 from code_agent_cli.project_file_assistant import (
     ProjectFileAssistantError,
     ProjectFileAssistantService,
+    build_content_generation_prompt,
     classify_file_intent,
     extract_target_path,
     is_project_file_goal,
 )
-from code_agent_cli.main import render_project_file_diff, render_raw_project_file_diff
+from code_agent_cli.main import (
+    render_project_file_diff,
+    render_raw_project_file_diff,
+    run_project_file_goal_with_service,
+)
 from code_agent_cli.project_files import (
     ProjectFileChange,
     ProjectFileError,
@@ -184,6 +192,62 @@ class ProjectFilesTests(unittest.TestCase):
         self.assertEqual(intent, "update")
         self.assertEqual(extract_target_path(goal, intent=intent), "README.md")
 
+    def test_explicit_paths_route_to_file_assistant_without_file_keyword(self) -> None:
+        goal = (
+            "Проверь docs/project-files-test.md по текущему project_files.py "
+            "и подготовь исправления"
+        )
+
+        self.assertTrue(is_project_file_goal(goal))
+        intent = classify_file_intent(goal)
+        self.assertEqual(intent, "update")
+        self.assertEqual(
+            extract_target_path(goal, intent=intent),
+            "docs/project-files-test.md",
+        )
+
+    def test_explicit_source_basename_is_read_for_document_update(self) -> None:
+        _directory, root = self.make_project()
+        docs = root / "docs"
+        docs.mkdir()
+        (docs / "project-files-test.md").write_text(
+            "# Project files\n\nOld API description.\n",
+            encoding="utf-8",
+        )
+        (root / "app/project_files.py").write_text(
+            "def prepare_change():\n    pass\n",
+            encoding="utf-8",
+        )
+        prompts: list[str] = []
+
+        def generate(prompt: str) -> str:
+            prompts.append(prompt)
+            return json.dumps(
+                {
+                    "edits": [
+                        {
+                            "old": "Old API description.",
+                            "new": "Current prepare_change API description.",
+                        }
+                    ]
+                }
+            )
+
+        assistant = ProjectFileAssistantService(
+            root,
+            client=DirectProjectFilesClient(ProjectFileService(root)),
+            content_generator=generate,
+        )
+
+        result = assistant.run(
+            "Проверь docs/project-files-test.md по текущему project_files.py "
+            "и подготовь исправления"
+        )
+
+        self.assertIn("app/project_files.py", result.analyzed_files)
+        self.assertIn('<PROJECT_FILE path="app/project_files.py">', prompts[0])
+        self.assertIn("Current prepare_change", result.changes[0].content)
+
     def test_rejects_suspiciously_truncated_existing_document(self) -> None:
         _directory, root = self.make_project()
         long_readme = "# Demo\n\n" + ("Important existing section.\n" * 120)
@@ -192,13 +256,99 @@ class ProjectFilesTests(unittest.TestCase):
         assistant = ProjectFileAssistantService(
             root,
             client=client,
-            content_generator=lambda _prompt: '{"content":"# Too short\\n"}',
+            content_generator=lambda _prompt: json.dumps(
+                {"edits": [{"old": long_readme.rstrip("\n"), "new": "# Too short"}]}
+            ),
         )
 
         with self.assertRaisesRegex(ProjectFileAssistantError, "подозрительно короткую"):
             assistant.run("Обнови README.md на основе файлов проекта")
 
         self.assertEqual((root / "README.md").read_text(encoding="utf-8"), long_readme)
+
+    def test_updates_existing_document_with_exact_generated_edits(self) -> None:
+        _directory, root = self.make_project()
+        client = DirectProjectFilesClient(ProjectFileService(root))
+        prompts: list[str] = []
+
+        def generate(prompt: str) -> str:
+            prompts.append(prompt)
+            return json.dumps(
+                {
+                    "edits": [
+                        {
+                            "old": "Old documentation.",
+                            "new": "Updated from app/service.py.",
+                        }
+                    ]
+                }
+            )
+
+        assistant = ProjectFileAssistantService(
+            root,
+            client=client,
+            content_generator=generate,
+        )
+
+        result = assistant.run("Обнови README.md по файлам проекта")
+
+        self.assertIn("Updated from app/service.py", result.changes[0].content)
+        self.assertIn('"edits"', prompts[0])
+        self.assertNotIn("Верни только JSON object вида {\"content\"", prompts[0])
+        self.assertEqual(
+            (root / "README.md").read_text(encoding="utf-8"),
+            "# Demo\n\nOld documentation.\n",
+        )
+
+    def test_large_update_context_keeps_target_and_other_source_files(self) -> None:
+        payloads = [
+            {"path": "README.md", "content": "README-" + ("r" * 70_000)},
+            {"path": "AGENTS.md", "content": "AGENTS-" + ("a" * 30_000)},
+            {"path": "code_agent_cli/main.py", "content": "MAIN-" + ("m" * 80_000)},
+        ]
+
+        prompt = build_content_generation_prompt(
+            goal="Обнови README по main.py",
+            target_path="README.md",
+            source_payloads=payloads,
+            update_existing=True,
+        )
+
+        self.assertIn('<PROJECT_FILE path="README.md">', prompt)
+        self.assertIn('<PROJECT_FILE path="AGENTS.md">', prompt)
+        self.assertIn('<PROJECT_FILE path="code_agent_cli/main.py">', prompt)
+        self.assertIn("... <часть файла пропущена> ...", prompt)
+        self.assertLess(len(prompt), 44_000)
+
+    def test_existing_document_can_be_reported_as_up_to_date(self) -> None:
+        _directory, root = self.make_project()
+        assistant = ProjectFileAssistantService(
+            root,
+            client=DirectProjectFilesClient(ProjectFileService(root)),
+            content_generator=lambda _prompt: '{"edits":[]}',
+        )
+
+        result = assistant.run("Проверь README.md и подготовь исправления")
+
+        self.assertEqual(result.changes, [])
+        self.assertIn("изменений не требуется", result.summary)
+
+    def test_cli_file_error_is_reported_without_crashing(self) -> None:
+        class FailingService:
+            def run(self, _goal: str, *, apply: bool) -> None:
+                del apply
+                raise ProjectFileError("expected failure")
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = run_project_file_goal_with_service(
+                FailingService(),  # type: ignore[arg-type]
+                "Обнови README.md",
+                apply=False,
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("expected failure", stderr.getvalue())
 
     def test_human_diff_hides_unified_markers_for_new_file(self) -> None:
         change = ProjectFileChange(

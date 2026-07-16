@@ -70,7 +70,7 @@ from code_agent_cli.project_file_assistant import (
     ProjectFileAssistantService,
     is_project_file_goal,
 )
-from code_agent_cli.project_files import ProjectFileChange
+from code_agent_cli.project_files import ProjectFileChange, ProjectFileError
 from code_agent_cli.rag_chat import (
     RAGChatService,
     run_rag_chat_production_check,
